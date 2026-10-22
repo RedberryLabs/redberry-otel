@@ -1,6 +1,6 @@
 {
   "name": "@redberrylabs/otel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Hash, store and sign AI agent runs on Vercel for Redberry (VALP): an OpenTelemetry span processor.",
   "license": "Apache-2.0",
   "type": "module",
