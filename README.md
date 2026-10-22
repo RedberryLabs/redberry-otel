@@ -1,4 +1,4 @@
-# @redberry/otel
+# @redberrylabs/otel
 
 An OpenTelemetry span processor for AI agents on Vercel. For each agent run (one request, one trace), it:
 
@@ -9,7 +9,13 @@ An OpenTelemetry span processor for AI agents on Vercel. For each agent run (one
 
 VALP keeps each report as a create-once leaf and seals the leaves into chained five-minute windows. A stored trace can later be checked against that leaf. The bytes and the report are pinned in [SPEC.md](SPEC.md).
 
-Private package. It is not published to npm. Install it from this repository or from a packed tarball (`npm pack`).
+## Install
+
+```sh
+npm install @redberrylabs/otel @vercel/otel @vercel/functions @ai-sdk/otel
+```
+
+`redberry connect --platform vercel` adds these dependencies, writes `instrumentation.ts` and sets the environment variables for you. Releases are published from GitHub Actions with npm provenance.
 
 ## Requirements
 
@@ -32,7 +38,7 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
   const { registerTelemetry } = await import('ai');
   const { OpenTelemetry } = await import('@ai-sdk/otel');
-  const { RedberryProcessor } = await import('@redberry/otel');
+  const { RedberryProcessor } = await import('@redberrylabs/otel');
   registerOTel({
     serviceName: 'refund-agent',
     // 'auto' keeps @vercel/otel's own export path beside Redberry's processor.
@@ -43,7 +49,7 @@ export async function register() {
 }
 ```
 
-`new RedberryProcessor()` takes no arguments: everything comes from the `REDBERRY_*` environment variables. Dependencies: `@redberry/otel`, `@vercel/otel`, `@ai-sdk/otel`, `@vercel/functions`, and `@vercel/blob` if you use the Blob store.
+`new RedberryProcessor()` takes no arguments: everything comes from the `REDBERRY_*` environment variables. Dependencies: `@redberrylabs/otel`, `@vercel/otel`, `@ai-sdk/otel`, `@vercel/functions`, and `@vercel/blob` if you use the Blob store.
 
 Agent routes must run on Node (the default; do not set `runtime = 'edge'`):
 
@@ -86,7 +92,7 @@ Agent ids are `AGT-` followed by a ULID. Anything else turns the processor off w
 ## Stores
 
 ```ts
-import { RedberryProcessor, vercelBlob, gcs, redberry } from '@redberry/otel';
+import { RedberryProcessor, vercelBlob, gcs, redberry } from '@redberrylabs/otel';
 
 new RedberryProcessor({ store: redberry() });     // the default: "Store logs with Redberry", VALP signs an upload URL
 new RedberryProcessor({ store: vercelBlob() });   // the project's private Blob store
@@ -134,3 +140,7 @@ npm run build     # tsup: ESM + CJS + .d.ts in dist/
 - **VALP `stored-logs/upload-url`** accepts only the agent's sink token (`X-VALP-Sink-Token`) today. The `redberry()` store sends `Authorization: Bearer <project token>`, so the route must accept a live project token for an agent in that project. VALP also names the object `….ndjson.gz`, but these bytes are one gzipped JSON document (SPEC §1), so `….json.gz` would be accurate.
 - **The CLI's environment already matches** this package: `REDBERRY_PROJECT_TOKEN`, `REDBERRY_URL`, `REDBERRY_SIGNING_KEY` (base64 PKCS8 DER), `REDBERRY_KEY_ID` (checked against the key), `REDBERRY_STORE`, `REDBERRY_AGENTS`, and the GCS names above. It could also set `REDBERRY_DEADLINE_MS` to the app's largest `maxDuration` (see Deadlines).
 - **The CLI's dependency `github:RedberryLabs/redberry-otel`** builds on install (the `prepare` script runs tsup). It needs the package merged to `main`, and Vercel's build must be able to read this private repository. Until the package is published, or the repository is made readable to builds, a Vercel build of a customer app cannot install it.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

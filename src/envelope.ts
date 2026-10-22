@@ -67,7 +67,7 @@ export function buildEnvelope(i: EnvelopeInput): TraceEnvelope {
     resource: { ...i.resource },
     spans,
     dropped_spans: i.droppedSpans ?? 0,
-    producer: i.producer ?? { name: '@redberry/otel', version: VERSION },
+    producer: i.producer ?? { name: '@redberrylabs/otel', version: VERSION },
   };
 }
 

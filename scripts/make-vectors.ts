@@ -8,7 +8,7 @@ import { buildEnvelope, encodeTrace, type EnvelopeInput } from '../src/envelope'
 import type { SpanJson } from '../src/span';
 
 const DIR = join(import.meta.dirname, '..', 'test', 'vectors');
-const PRODUCER = { name: '@redberry/otel', version: '0.1.0' };
+const PRODUCER = { name: '@redberrylabs/otel', version: '0.1.0' };
 const AGENT = 'AGT-01K5V8QJ3M7XW2ZB4YRNCDEFGH';
 const TRACE = '45e3cc173b7aae7a6e658021710f8848';
 

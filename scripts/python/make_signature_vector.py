@@ -1,6 +1,6 @@
 """Write test/vectors/signature.json with VALP's own Python code (valp_core.keys / valp_core.hashing).
 
-The TypeScript tests check that @redberry/otel derives the same key_id, produces the same signature
+The TypeScript tests check that @redberrylabs/otel derives the same key_id, produces the same signature
 (Ed25519 is deterministic) and that VALP's verifier accepts it. Run with a VALP checkout on the path:
 
     PYTHONPATH=<VALP>/src <VALP>/.venv/bin/python scripts/python/make_signature_vector.py

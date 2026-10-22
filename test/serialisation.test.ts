@@ -139,6 +139,6 @@ describe('spanToJson / envelope', () => {
     expect(VERSION).toBe(pkg.version);
     const v = vectors.find((x) => x.name === 'v1-minimal')!;
     const { producer: _p, ...rest } = v.input;
-    expect(buildEnvelope(rest).producer).toEqual({ name: '@redberry/otel', version: VERSION });
+    expect(buildEnvelope(rest).producer).toEqual({ name: '@redberrylabs/otel', version: VERSION });
   });
 });
