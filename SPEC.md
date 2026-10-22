@@ -20,7 +20,7 @@ One JSON object per trace (one request, one agent run):
 | `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*` on Vercel, `cloud.*` on Azure, …). |
 | `spans` | array | Every span of the trace that the processor saw, in the order of §2.2. |
 | `dropped_spans` | integer | Spans not kept because the per-trace cap was reached (default cap 10,000). |
-| `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }` |
+| `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }`. `name` identifies the writer: another conforming writer, such as the Python hasher in `redberry-agent-sdk`, sets its own name and version. |
 
 ## 2. Spans
 
@@ -75,6 +75,8 @@ The stored bytes are the canonical JSON compressed with gzip (RFC 1952) by **ffl
 - The DEFLATE stream is fflate's output at level 6. Other implementations, including Node's `zlib`, produce different (still valid) compressed bytes, which is why the implementation and its version are pinned. `fflate` is an exact dependency (`0.8.3`, not a range).
 
 Anyone can decompress the bytes with any gunzip. Re-compressing to the same bytes needs fflate 0.8.3. The commitment is always to the stored bytes as they are (§5), so a verifier hashes what is stored and never re-compresses.
+
+**Other writers.** The fflate 0.8.3 bytes above are what this package writes. Another conforming writer, identified by `producer.name` (§1), such as the Python hasher in `redberry-agent-sdk`, writes the same 10-byte header but may produce a different DEFLATE stream from the same canonical JSON. Such documents verify in exactly the same way, because verification (§9) hashes the stored bytes and decompresses them, and never re-compresses. What every writer must match byte for byte is the canonical JSON (§3).
 
 ## 5. Hash, size and storage
 
