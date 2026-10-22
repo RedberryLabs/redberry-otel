@@ -1,6 +1,7 @@
 name: release
 # Publishes @redberrylabs/otel to npm when a version tag (v*) is pushed.
-# The tag must match package.json; the build is published with npm provenance.
+# The tag must match package.json. Publishing uses npm trusted publishing (OIDC from this
+# workflow), so no npm token is stored anywhere; provenance is attached automatically.
 on:
   push:
     tags: ['v*']
@@ -21,10 +22,10 @@ jobs:
         run: |
           v=$(node -p "require('./package.json').version")
           [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match package.json version $v"; exit 1; }
+      - name: npm with trusted publishing support
+        run: npm install -g npm@^11.5.1
       - run: npm ci
       - run: npm run lint
       - run: npm test
       - run: npm run build
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
