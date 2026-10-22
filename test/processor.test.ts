@@ -7,7 +7,7 @@ import { sha256Hex } from '../src/crypto';
 import { RedberryProcessor, type TraceResult } from '../src/processor';
 import type { RedberryOptions } from '../src/config';
 import type { Store } from '../src/stores/types';
-import { AGENT, AGENT_B, aiAttrs, fakeFetch, fakeSpan, json, memoryStore, productionEnv, withEnv, type FakeSpan } from './helpers';
+import { AGENT, AGENT_B, aiAttrs, azureEnv, fakeFetch, fakeSpan, json, memoryStore, productionEnv, withEnv, type FakeSpan } from './helpers';
 
 const GRACE = 2000;
 const REQUEST_CONTEXT = Symbol.for('@vercel/request-context');
@@ -382,6 +382,25 @@ describe('pipeline', () => {
     spans.forEach((s) => end(p, s));
     await waited[0];
     expect(results).toHaveLength(1);
+  });
+
+  it('outside Vercel, does not use waitUntil: settle() finalises a quiet trace at once and resolves after store and report', async () => {
+    restoreEnv();
+    restoreEnv = withEnv(azureEnv());
+    const waited: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = { get: () => ({ waitUntil: (pr: Promise<unknown>) => waited.push(pr) }) };
+    const { p, results, store } = setup({ graceMs: 60_000 });
+    const { traceId, spans } = tree();
+    startAll(p, spans);
+    expect(waited).toHaveLength(0);
+    expect(p.settle(traceId)).toBeUndefined(); // still running: nothing to wait for yet
+    spans.forEach((s) => end(p, s)); // ...and once the last span ends it is finalised without the grace period
+    const done = p.settle(traceId);
+    expect(done).toBeInstanceOf(Promise);
+    expect(await done).toMatchObject({ traceId, finish: 'complete', stored: true, report: { outcome: 'recorded' } });
+    expect(results).toHaveLength(1);
+    expect(store.puts).toHaveLength(1);
+    expect(p.settle('f'.repeat(32))).toBeUndefined();
   });
 
   it('runs store and report with tracing suppressed', async () => {

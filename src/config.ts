@@ -3,6 +3,7 @@
 import { isAgentId } from './agents';
 import type { Fetch } from './http';
 import type { TraceResult } from './processor';
+import { azureBlob } from './stores/azure-blob';
 import { gcs } from './stores/gcs';
 import { redberry } from './stores/redberry';
 import type { Store } from './stores/types';
@@ -20,7 +21,7 @@ export interface RedberryOptions {
   agentId?: string;
   /** Route -> agent id, matched against the root span's http.route / next.route / URL path. Env: REDBERRY_AGENTS (JSON). */
   agentsByRoute?: Record<string, string>;
-  /** Where the bytes go. Env: REDBERRY_STORE = redberry (default) | vercel-blob | gcs. */
+  /** Where the bytes go. Env: REDBERRY_STORE = redberry (default) | vercel-blob | gcs | azure-blob. */
   store?: Store;
   /** VALP base URL. Env: REDBERRY_URL. */
   url?: string;
@@ -30,7 +31,10 @@ export interface RedberryOptions {
   signingKey?: string;
   /** Checked against the key when given; derived from it otherwise. Env: REDBERRY_KEY_ID. */
   keyId?: string;
-  /** Run in every Vercel environment, not only production. Env: REDBERRY_ALL_ENVS=1. */
+  /**
+   * Run in every Vercel environment, not only production, and anywhere else that is neither Vercel nor
+   * Azure App Service / Functions. Env: REDBERRY_ALL_ENVS=1.
+   */
   allEnvs?: boolean;
   /** Quiet period after the root ends and nothing is open, before finalising (ms, default 2000). */
   graceMs?: number;
@@ -57,9 +61,13 @@ export interface RedberryOptions {
   retryDelaysMs?: readonly number[];
 }
 
+/** Where the processor runs: decides the enablement rule and how background work is kept alive. */
+export type Platform = 'vercel' | 'azure' | 'other';
+
 export interface ResolvedConfig {
   enabled: boolean;
   disabledReason?: string;
+  platform: Platform;
   agentId?: string;
   agentsByRoute?: Record<string, string>;
   store?: Store;
@@ -97,9 +105,18 @@ export const defaultLogger: Logger = {
   error: (...a) => console.error('[redberry]', ...a),
 };
 
+/** Vercel when VERCEL_ENV (or VERCEL) is set; Azure App Service / Functions when WEBSITE_SITE_NAME is. */
+export function platformOf(env: Env): Platform {
+  if (env.VERCEL_ENV || env.VERCEL) return 'vercel';
+  if (env.WEBSITE_SITE_NAME) return 'azure';
+  return 'other';
+}
+
 /**
- * The store named by REDBERRY_STORE: ``redberry`` (the default, as in the CLI), ``vercel-blob`` or ``gcs``
- * (with REDBERRY_GCS_BUCKET, GCP_PROJECT_NUMBER, GCP_WORKLOAD_POOL, GCP_WORKLOAD_PROVIDER, GCP_SERVICE_ACCOUNT).
+ * The store named by REDBERRY_STORE: ``redberry`` (the default, as in the CLI), ``vercel-blob``, ``gcs``
+ * (with REDBERRY_GCS_BUCKET, GCP_PROJECT_NUMBER, GCP_WORKLOAD_POOL, GCP_WORKLOAD_PROVIDER, GCP_SERVICE_ACCOUNT)
+ * or ``azure-blob`` (with REDBERRY_AZURE_CONTAINER_URL, REDBERRY_AZURE_TENANT_ID and REDBERRY_AZURE_CLIENT_ID, or
+ * AZURE_TENANT_ID and AZURE_CLIENT_ID as fallbacks).
  */
 export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?: Fetch): Store {
   const kind = (env.REDBERRY_STORE || 'redberry').trim();
@@ -118,8 +135,19 @@ export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?:
         serviceAccount: env.GCP_SERVICE_ACCOUNT ?? '',
         fetch: fetchImpl,
       });
+    case 'azure-blob':
+      // The names `redberry connect --store azure-blob` sets (from `redberry setup-azure`).
+      return azureBlob({
+        containerUrl: env.REDBERRY_AZURE_CONTAINER_URL ?? '',
+        // REDBERRY_AZURE_* first: AZURE_CLIENT_ID app-wide would also change which identity the app's own
+        // DefaultAzureCredential uses.
+        tenantId: env.REDBERRY_AZURE_TENANT_ID || env.AZURE_TENANT_ID || undefined,
+        clientId: env.REDBERRY_AZURE_CLIENT_ID || env.AZURE_CLIENT_ID || undefined,
+        env,
+        fetch: fetchImpl,
+      });
     default:
-      throw new Error(`REDBERRY_STORE must be vercel-blob, redberry or gcs, not ${JSON.stringify(kind)}`);
+      throw new Error(`REDBERRY_STORE must be redberry, vercel-blob, gcs or azure-blob, not ${JSON.stringify(kind)}`);
   }
 }
 
@@ -127,8 +155,10 @@ export function resolveConfig(o: RedberryOptions = {}, env: Env = process.env): 
   const logger = o.logger ?? defaultLogger;
   const url = o.url ?? env.REDBERRY_URL ?? '';
   const token = o.token ?? env.REDBERRY_PROJECT_TOKEN ?? '';
+  const platform = platformOf(env);
   const base: ResolvedConfig = {
     enabled: false,
+    platform,
     url,
     token,
     signingKey: o.signingKey ?? env.REDBERRY_SIGNING_KEY ?? '',
@@ -152,9 +182,15 @@ export function resolveConfig(o: RedberryOptions = {}, env: Env = process.env): 
   };
 
   if (env.NEXT_RUNTIME === 'edge') return off('the Edge runtime is not supported; register RedberryProcessor in the Node.js runtime only');
+  if (env.REDBERRY_DISABLED === '1') return off('REDBERRY_DISABLED=1', false);
+  // Vercel: production only. Azure App Service / Functions: always (it has no preview environments of its
+  // own). Anywhere else (local development, CI): off.
   const allEnvs = o.allEnvs ?? env.REDBERRY_ALL_ENVS === '1';
-  if (!allEnvs && env.VERCEL_ENV !== 'production') {
+  if (!allEnvs && platform === 'vercel' && env.VERCEL_ENV !== 'production') {
     return off(`not production (VERCEL_ENV=${env.VERCEL_ENV ?? 'unset'}); set REDBERRY_ALL_ENVS=1 to run here`, false);
+  }
+  if (!allEnvs && platform === 'other') {
+    return off('not on Vercel or Azure (VERCEL_ENV and WEBSITE_SITE_NAME unset); set REDBERRY_ALL_ENVS=1 to run here', false);
   }
 
   let agentsByRoute = o.agentsByRoute;
@@ -168,7 +204,8 @@ export function resolveConfig(o: RedberryOptions = {}, env: Env = process.env): 
     }
   }
   const agents = [...Object.values(agentsByRoute ?? {}), ...(base.agentId ? [base.agentId] : [])];
-  if (agents.length === 0) return off('no agent: set REDBERRY_AGENT_ID or REDBERRY_AGENTS (or agentId / agentsByRoute)');
+  // Outside Vercel, withRedberry(handler, { agentId }) can name the agent on the invocation's root span instead.
+  if (agents.length === 0 && platform === 'vercel') return off('no agent: set REDBERRY_AGENT_ID or REDBERRY_AGENTS (or agentId / agentsByRoute)');
   const bad = agents.filter((a) => !isAgentId(a));
   if (bad.length) return off(`not agent ids (AGT- and a ULID): ${bad.join(', ')}`);
   if (!url) return off('REDBERRY_URL is not set');

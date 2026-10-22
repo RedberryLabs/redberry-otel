@@ -34,7 +34,8 @@ export const UPLOAD_URL = 'https://storage.googleapis.com/upload/storage/v1/b/';
 const SCOPE_CLOUD = 'https://www.googleapis.com/auth/cloud-platform';
 const SCOPE_STORAGE = 'https://www.googleapis.com/auth/devstorage.read_write';
 
-async function vercelOidcToken(): Promise<string> {
+/** The function's Vercel OIDC token (also used by the azure-blob store). */
+export async function vercelOidcToken(): Promise<string> {
   const m = await import('@vercel/functions/oidc');
   return m.getVercelOidcToken();
 }

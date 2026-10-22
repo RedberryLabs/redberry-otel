@@ -17,10 +17,10 @@ One JSON object per trace (one request, one agent run):
 | `cut_reason` | string or null | `null` when `finish` is `"complete"`. Otherwise one of `"deadline"`, `"hard_stop"` or `"shutdown"`. |
 | `started_at` | string | The earliest span start, as ISO-8601 UTC with milliseconds, truncated (`YYYY-MM-DDTHH:MM:SS.mmmZ`). |
 | `ended_at` | string | The latest of: every ended span's end, every open span's start and, for `cut_short`, the moment of the cut. Same format. |
-| `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*`, …). |
+| `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*` on Vercel, `cloud.*` on Azure, …). |
 | `spans` | array | Every span of the trace that the processor saw, in the order of §2.2. |
 | `dropped_spans` | integer | Spans not kept because the per-trace cap was reached (default cap 10,000). |
-| `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }` |
+| `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }`. `name` identifies the writer: another conforming writer, such as the Python hasher in `redberry-agent-sdk`, sets its own name and version. |
 
 ## 2. Spans
 
@@ -76,6 +76,8 @@ The stored bytes are the canonical JSON compressed with gzip (RFC 1952) by **ffl
 
 Anyone can decompress the bytes with any gunzip. Re-compressing to the same bytes needs fflate 0.8.3. The commitment is always to the stored bytes as they are (§5), so a verifier hashes what is stored and never re-compresses.
 
+**Other writers.** The fflate 0.8.3 bytes above are what this package writes. Another conforming writer, identified by `producer.name` (§1), such as the Python hasher in `redberry-agent-sdk`, writes the same 10-byte header but may produce a different DEFLATE stream from the same canonical JSON. Such documents verify in exactly the same way, because verification (§9) hashes the stored bytes and decompresses them, and never re-compresses. What every writer must match byte for byte is the canonical JSON (§3).
+
 ## 5. Hash, size and storage
 
 - `sha256` is the lowercase hex SHA-256 of the stored (gzip) bytes.
@@ -86,6 +88,7 @@ Anyone can decompress the bytes with any gunzip. Re-compressing to the same byte
 |---|---|---|
 | `vercel-blob` | The customer's Vercel Blob store at the path above, with `access: "private"`, `addRandomSuffix: false`, `allowOverwrite: false`, `contentType: "application/gzip"` | Blob refuses a second `put` to the same path. This is no-overwrite, not immutability: the store's read-write token can delete. |
 | `gcs` | The customer's bucket at the path above. The JSON API multipart upload uses `ifGenerationMatch=0` and object metadata `sha256`. Credentials come from Vercel OIDC, then Google STS (pool `GCP_WORKLOAD_POOL`, provider `GCP_WORKLOAD_PROVIDER`, project `GCP_PROJECT_NUMBER`), then IAM Credentials `generateAccessToken` for `GCP_SERVICE_ACCOUNT`. | GCS refuses (412). Bucket retention gives immutability. |
+| `azure-blob` | The customer's Azure Blob Storage container (`REDBERRY_AZURE_CONTAINER_URL`, `https://<account>.blob.core.windows.net/<container>`) at the path above. Put Blob (`x-ms-version: 2023-11-03`, `x-ms-blob-type: BlockBlob`) with `If-None-Match: *`, `Content-Type: application/gzip` and metadata `x-ms-meta-sha256`. There is no storage key or SAS. On Vercel, the function's Vercel OIDC token is the client assertion in an Entra ID `client_credentials` request (`REDBERRY_AZURE_TENANT_ID`, `REDBERRY_AZURE_CLIENT_ID`, scope `https://storage.azure.com/.default`). On Azure Functions and App Service, the token comes from the managed-identity endpoint (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, with `REDBERRY_AZURE_CLIENT_ID` for a user-assigned identity). `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are read when the `REDBERRY_AZURE_*` names are unset, but the `REDBERRY_AZURE_*` names are recommended: `AZURE_CLIENT_ID` set app-wide also changes the identity the app's own `DefaultAzureCredential` uses. | Azure refuses (409 `BlobAlreadyExists`). The container's time-based immutability policy makes each object write-once: it cannot be changed or deleted until the retention period ends, even by the account owner once the policy is locked. Unlike Vercel Blob, this is immutability, not only no-overwrite. |
 | `redberry` | Redberry's bucket, under the object name VALP chooses (`agent=<id>/dt=<date>/<trace_id>…`), through a signed create-only PUT that VALP pins to this size and SHA-256 | VALP and GCS both refuse. A 412 on retry means the same bytes are already there. |
 
 `REDBERRY_STORE` picks the store, and the default is `redberry`, as in the CLI. If the store write fails, the report still goes out with `stored: false`.
@@ -123,7 +126,7 @@ The body is canonical JSON (§3) of exactly these ten fields, and is at most 4,0
 
 **Pricing sample.** When a 200 or 201 reply carries `sample: {url, method, headers}`, the stored bytes are sent with `PUT` to `url` with exactly `headers`. The upload has the same retries as the report. A 412 means the sample is already there.
 
-All of this runs inside `waitUntil` from `@vercel/functions`, with OpenTelemetry tracing suppressed so that the package's own requests add no spans.
+On Vercel, all of this runs inside `waitUntil` from `@vercel/functions`. Outside Vercel, `withRedberry` awaits it before the invocation returns (§10). Either way, OpenTelemetry tracing is suppressed so that the package's own requests add no spans.
 
 ## 7. Golden vectors
 
@@ -149,11 +152,14 @@ All of this runs inside `waitUntil` from `@vercel/functions`, with OpenTelemetry
 
 **Filters.**
 
-- The processor runs only when `VERCEL_ENV` is `production`, unless `REDBERRY_ALL_ENVS=1`.
+- `REDBERRY_DISABLED=1` turns the processor off everywhere.
+- On Vercel (`VERCEL_ENV` set), the processor runs only when `VERCEL_ENV` is `production`, unless `REDBERRY_ALL_ENVS=1`.
+- On Azure App Service and Azure Functions (`WEBSITE_SITE_NAME` set, no `VERCEL_ENV`), it always runs. These platforms have no preview environments of their own.
+- Anywhere else (local development, CI), it runs only with `REDBERRY_ALL_ENVS=1`.
 - It runs only in the Node.js runtime, never on Edge.
 - By default, a trace is hashed only if it has an AI SDK span. That is a span with a `gen_ai.operation.name` attribute, a name starting `ai.`, or the scope `gen_ai` or `ai`.
 
-**Agent.** AI SDK 7 drops `metadata`, so the agent never comes from span attributes. It is decided here and then stamped on every span (§2.1). The package checks `agentsByRoute` (`REDBERRY_AGENTS`) against the root span's routes, in this order: `http.route`, `next.route`, then the URL path (`url.path`, or `http.target` / `http.url` without the query string). A key matches exactly, or, if it ends in `*`, as a prefix, and the longest prefix wins. If nothing matches, the package uses `agentId` (`REDBERRY_AGENT_ID`). If there is still no agent, the trace is skipped and counted (`skippedNoAgent`).
+**Agent.** AI SDK 7 drops `metadata`, so the agent never comes from the AI SDK's span attributes. It is decided here and then stamped on every span (§2.1). If the root span carries a valid `redberry.agent_id` (which `withRedberry({ agentId })` sets, §10), that agent wins. Otherwise the package checks `agentsByRoute` (`REDBERRY_AGENTS`) against the root span's routes, in this order: `http.route`, `next.route`, then the URL path (`url.path`, or `http.target` / `http.url` without the query string). A key matches exactly, or, if it ends in `*`, as a prefix, and the longest prefix wins. If nothing matches, the package uses `agentId` (`REDBERRY_AGENT_ID`). If there is still no agent, the trace is skipped and counted (`skippedNoAgent`). On Vercel, the processor turns itself off unless at least one agent is configured. Outside Vercel it may run with none configured, because `withRedberry` can name the agent per handler.
 
 ## 9. Verifying a stored trace
 
@@ -166,3 +172,19 @@ assert doc.schema == "redberry.trace.v1"
 assert doc.agent_id == leaf.body.agent_id and doc.trace_id == leaf.body.trace_id
 assert doc.started_at == leaf.body.started_at and doc.ended_at == leaf.body.ended_at
 ```
+
+## 10. Azure Functions (Node.js)
+
+Azure Functions has no `waitUntil`, so a run is not left to finish in the background. `withRedberry(handler, { agentId? })` wraps an Azure Functions v4 handler `(request, context) => …` (or any function), and each invocation becomes one trace:
+
+1. It starts a new root span for the invocation, in a new trace, with the scope `@redberrylabs/otel`. The span is named after `context.functionName` and has the attributes `faas.name`, `faas.invocation_id`, `faas.trigger` and, when given, `redberry.agent_id`. For an HTTP trigger it also has `http.request.method`, `url.path` (never the query string, which can carry function keys) and `http.response.status_code`. If a span was already active, the root links to it.
+2. It runs the handler with that span active. The AI SDK's spans start under `context.active()`, so they join the trace. This needs an AsyncLocalStorage context manager, which `registerRedberry()` registers.
+3. When the handler settles, the root span ends. If nothing else in the trace is open, the trace is finalised at once, as `complete`, with no grace period, and the wrapper waits for the store write and the hash report before it returns. If spans are still open (a streamed response, say), the wrapper returns at once. The trace is then finalised, without the grace period, as soon as the last span ends, with `hardStopMs` and `deadlineMs` still applying.
+4. The wait is bounded by `flushTimeoutMs` (default 10 s). Past it, the wrapper returns and the work carries on in the background.
+5. The handler's return value is passed back unchanged. An error it throws is recorded on the root span (status 2 and an `exception` event) and rethrown after the flush.
+
+A span that starts after the trace was finalised (work the handler did not await) is counted as late, as in §8.
+
+`registerRedberry(options?)`, from `@redberrylabs/otel/node`, registers once per process a tracer provider with `RedberryProcessor`, an AsyncLocalStorage context manager, and a resource with `service.name` (option `serviceName`, else `OTEL_SERVICE_NAME`, else `WEBSITE_SITE_NAME`). On Azure the resource also carries `cloud.provider: "azure"`, `cloud.platform` (`azure.functions` or `azure.app_service`), `cloud.region` and `faas.instance`. If another tracer provider is already registered, it stays in place and `RedberryProcessor` has to be added to that provider instead.
+
+The stored document, its bytes and the report are exactly those of §1 to §6: only the way the run is delimited and kept alive differs.

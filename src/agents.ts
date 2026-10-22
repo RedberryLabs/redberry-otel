@@ -1,7 +1,8 @@
 // Which Redberry agent a trace belongs to. AI SDK 7 drops ``metadata``, so the package does not read an
-// agent id from the spans: it decides from its own config and records the answer as the envelope's
-// ``agent_id`` (and the report's).
+// agent id from the AI spans: it decides from its own config (or the root span withRedberry opens) and
+// records the answer as the envelope's ``agent_id`` (and the report's).
 import type { Attributes } from '@opentelemetry/api';
+import { AGENT_ATTRIBUTE } from './envelope';
 
 export const AGENT_ID = /^AGT-[0-9A-HJKMNP-TV-Z]{26}$/;
 
@@ -46,8 +47,13 @@ export function matchRoute(route: string, map: Record<string, string>): string |
   return best === undefined ? undefined : map[best];
 }
 
-/** The route map against the root span's routes (first candidate that matches), else the default agent. */
+/**
+ * The root span's own ``redberry.agent_id`` (set by withRedberry), else the route map against the root
+ * span's routes (first candidate that matches), else the default agent.
+ */
 export function resolveAgent(rootAttrs: Attributes, agentsByRoute: Record<string, string> | undefined, agentId: string | undefined): string | undefined {
+  const own = rootAttrs[AGENT_ATTRIBUTE];
+  if (isAgentId(own)) return own;
   if (agentsByRoute) {
     for (const route of routeCandidates(rootAttrs)) {
       const hit = matchRoute(route, agentsByRoute);

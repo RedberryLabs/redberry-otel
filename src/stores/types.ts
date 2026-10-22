@@ -1,5 +1,5 @@
 /** The ``store`` values VALP's hash report accepts. */
-export type StoreKind = 'redberry' | 'vercel-blob' | 'gcs';
+export type StoreKind = 'redberry' | 'vercel-blob' | 'gcs' | 'azure-blob';
 
 /** What a store may need besides the path and bytes (the Redberry store names the run to VALP). */
 export interface PutMeta {
