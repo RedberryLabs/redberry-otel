@@ -1,6 +1,6 @@
-# @redberry/otel: stored trace and hash report, v1
+# @redberrylabs/otel: stored trace and hash report, v1
 
-This document pins the bytes that `@redberry/otel` stores for each AI agent run and the report it signs and sends to VALP. Anyone holding a stored trace and its VALP leaf must be able to check one against the other years from now, without this package. Where this document and the code disagree, the golden vectors in `test/vectors/` decide, and the disagreement is a bug.
+This document pins the bytes that `@redberrylabs/otel` stores for each AI agent run and the report it signs and sends to VALP. Anyone holding a stored trace and its VALP leaf must be able to check one against the other years from now, without this package. Where this document and the code disagree, the golden vectors in `test/vectors/` decide, and the disagreement is a bug.
 
 **Versioning.** The stored document carries `schema: "redberry.trace.v1"`. Any change to the bytes described here needs a new schema value and new golden vectors. That includes field names, ordering, number or string encoding and the compression settings. Vectors already committed are never edited.
 
@@ -20,7 +20,7 @@ One JSON object per trace (one request, one agent run):
 | `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*`, …). |
 | `spans` | array | Every span of the trace that the processor saw, in the order of §2.2. |
 | `dropped_spans` | integer | Spans not kept because the per-trace cap was reached (default cap 10,000). |
-| `producer` | object | `{ "name": "@redberry/otel", "version": "<semver>" }` |
+| `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }` |
 
 ## 2. Spans
 

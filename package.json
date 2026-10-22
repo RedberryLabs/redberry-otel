@@ -1,9 +1,8 @@
 {
-  "name": "@redberry/otel",
+  "name": "@redberrylabs/otel",
   "version": "0.1.0",
   "description": "Hash, store and sign AI agent runs on Vercel for Redberry (VALP): an OpenTelemetry span processor.",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -27,7 +26,9 @@
   "files": [
     "dist",
     "SPEC.md",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "sideEffects": false,
   "scripts": {
@@ -66,5 +67,17 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.72.0",
     "vitest": "^5.0.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RedberryLabs/redberry-otel.git"
+  },
+  "homepage": "https://github.com/RedberryLabs/redberry-otel#readme",
+  "bugs": {
+    "url": "https://github.com/RedberryLabs/redberry-otel/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

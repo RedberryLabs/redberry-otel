@@ -321,7 +321,8 @@ describe('pipeline', () => {
     await p.shutdown();
     const r = results[0]!;
     const put = store.puts[0]!;
-    expect(put.path).toBe(`redberry/${AGENT}/${new Date().toISOString().slice(0, 10)}/${traceId}.json.gz`);
+    // The date is the run's start date (SPEC.md §5), not today's.
+    expect(put.path).toMatch(new RegExp(`^redberry/${AGENT}/\\d{4}-\\d{2}-\\d{2}/${traceId}\\.json\\.gz$`));
     expect(put.meta).toEqual({ agentId: AGENT, traceId, sha256: r.sha256, size: r.size });
     expect(await sha256Hex(put.bytes)).toBe(r.sha256);
     const doc = JSON.parse(new TextDecoder().decode(gunzipSync(put.bytes)));
