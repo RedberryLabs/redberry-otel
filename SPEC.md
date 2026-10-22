@@ -1,0 +1,168 @@
+# @redberry/otel: stored trace and hash report, v1
+
+This document pins the bytes that `@redberry/otel` stores for each AI agent run and the report it signs and sends to VALP. Anyone holding a stored trace and its VALP leaf must be able to check one against the other years from now, without this package. Where this document and the code disagree, the golden vectors in `test/vectors/` decide, and the disagreement is a bug.
+
+**Versioning.** The stored document carries `schema: "redberry.trace.v1"`. Any change to the bytes described here needs a new schema value and new golden vectors. That includes field names, ordering, number or string encoding and the compression settings. Vectors already committed are never edited.
+
+## 1. The stored document
+
+One JSON object per trace (one request, one agent run):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema` | string | `"redberry.trace.v1"` |
+| `agent_id` | string | The Redberry agent, `AGT-` + a 26-character Crockford ULID. The package sets it from its own configuration (§8), not from span attributes. The same id is also stamped on every span as `redberry.agent_id` (§2.1). |
+| `trace_id` | string | The OpenTelemetry trace id: 32 lowercase hex characters. |
+| `finish` | string | `"complete"`: the finish rule held (§8). `"cut_short"`: the trace was finalised while at least one span was still open, or before its root ended. |
+| `cut_reason` | string or null | `null` when `finish` is `"complete"`. Otherwise one of `"deadline"`, `"hard_stop"` or `"shutdown"`. |
+| `started_at` | string | The earliest span start, as ISO-8601 UTC with milliseconds, truncated (`YYYY-MM-DDTHH:MM:SS.mmmZ`). |
+| `ended_at` | string | The latest of: every ended span's end, every open span's start and, for `cut_short`, the moment of the cut. Same format. |
+| `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*`, …). |
+| `spans` | array | Every span of the trace that the processor saw, in the order of §2.2. |
+| `dropped_spans` | integer | Spans not kept because the per-trace cap was reached (default cap 10,000). |
+| `producer` | object | `{ "name": "@redberry/otel", "version": "<semver>" }` |
+
+## 2. Spans
+
+### 2.1 Fields
+
+Field names follow OTLP/JSON. Every field is always present.
+
+| Field | Type | Notes |
+|---|---|---|
+| `traceId` | string | 32 lowercase hex characters |
+| `spanId` | string | 16 lowercase hex characters |
+| `parentSpanId` | string or null | `null` for a span with no parent |
+| `name` | string | |
+| `kind` | integer | OpenTelemetry `SpanKind`: 0 internal, 1 server, 2 client, 3 producer, 4 consumer |
+| `startTimeUnixNano` | string | Nanoseconds since the Unix epoch, as a decimal string (no float rounding) |
+| `endTimeUnixNano` | string or null | Same format. `null` when the span was still open when the trace was cut short. |
+| `attributes` | object | The span's attributes **exactly as emitted**, plus one: `redberry.agent_id`, the document's `agent_id`. It is set on every span and replaces any value the span emitted under that name, and the OTELLINE normaliser reads it first. Values are strings, booleans, numbers or arrays of these. A value that is itself JSON text (most `gen_ai.*` messages, tool arguments and results) stays a string. It is never parsed or re-encoded. |
+| `status` | object | `{ "code": 0 \| 1 \| 2, "message": string \| null }`. An empty message is `null`. |
+| `events` | array | `{ name, timeUnixNano, attributes, droppedAttributesCount }`, in the order emitted |
+| `links` | array | `{ traceId, spanId, attributes, droppedAttributesCount }`, in the order emitted |
+| `scope` | object | Instrumentation scope: `{ name, version: string \| null, schemaUrl: string \| null }` |
+| `dropped` | object | `{ attributes, events, links }`: the counts the SDK dropped |
+
+### 2.2 Order
+
+Spans are sorted by `startTimeUnixNano` compared as integers, then by `spanId` in ordinal (byte) order.
+
+## 3. Canonical JSON
+
+The document is serialised as RFC 8785 (JSON Canonicalization Scheme) and encoded as UTF-8:
+
+- Object keys are sorted by UTF-16 code units, recursively at every level. No whitespace is added.
+- Numbers use the ECMAScript shortest round-trip form (`Number.prototype.toString`). For example: `1`, `0.1`, `1e+21`, `1e-7`. `-0` is written as `0`.
+- Strings are escaped as ECMAScript `JSON.stringify` escapes them: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00XX` for other C0 controls. All other characters are written literally, including U+007F, U+2028 and U+2029. A lone surrogate becomes a `\udXXX` escape.
+
+OpenTelemetry can hold values that JSON cannot. These are pinned as follows:
+
+| Value | Written as |
+|---|---|
+| an object member whose value is `undefined` | the member is omitted |
+| an array element that is `undefined` or `null` | `null` |
+| `NaN`, `Infinity`, `-Infinity` | the strings `"NaN"`, `"Infinity"`, `"-Infinity"` |
+| a bigint | its decimal string |
+
+The test suite checks every golden vector against an independent RFC 8785 implementation (the `canonicalize` package).
+
+## 4. Compression: the stored bytes
+
+The stored bytes are the canonical JSON compressed with gzip (RFC 1952) by **fflate 0.8.3** `gzipSync(data, { level: 6, mtime: 0 })`:
+
+- The header is exactly `1f 8b 08 00 00 00 00 00 00 03`: deflate, no flags, no file name, mtime 0, XFL 0, OS 3 (Unix).
+- The DEFLATE stream is fflate's output at level 6. Other implementations, including Node's `zlib`, produce different (still valid) compressed bytes, which is why the implementation and its version are pinned. `fflate` is an exact dependency (`0.8.3`, not a range).
+
+Anyone can decompress the bytes with any gunzip. Re-compressing to the same bytes needs fflate 0.8.3. The commitment is always to the stored bytes as they are (§5), so a verifier hashes what is stored and never re-compresses.
+
+## 5. Hash, size and storage
+
+- `sha256` is the lowercase hex SHA-256 of the stored (gzip) bytes.
+- `size` is their length in bytes.
+- The storage path is `redberry/<agent_id>/<YYYY-MM-DD of started_at>/<trace_id>.json.gz`.
+
+| Store (`store`) | Where the bytes go | No-overwrite guarantee |
+|---|---|---|
+| `vercel-blob` | The customer's Vercel Blob store at the path above, with `access: "private"`, `addRandomSuffix: false`, `allowOverwrite: false`, `contentType: "application/gzip"` | Blob refuses a second `put` to the same path. This is no-overwrite, not immutability: the store's read-write token can delete. |
+| `gcs` | The customer's bucket at the path above. The JSON API multipart upload uses `ifGenerationMatch=0` and object metadata `sha256`. Credentials come from Vercel OIDC, then Google STS (pool `GCP_WORKLOAD_POOL`, provider `GCP_WORKLOAD_PROVIDER`, project `GCP_PROJECT_NUMBER`), then IAM Credentials `generateAccessToken` for `GCP_SERVICE_ACCOUNT`. | GCS refuses (412). Bucket retention gives immutability. |
+| `redberry` | Redberry's bucket, under the object name VALP chooses (`agent=<id>/dt=<date>/<trace_id>…`), through a signed create-only PUT that VALP pins to this size and SHA-256 | VALP and GCS both refuse. A 412 on retry means the same bytes are already there. |
+
+`REDBERRY_STORE` picks the store, and the default is `redberry`, as in the CLI. If the store write fails, the report still goes out with `stored: false`.
+
+## 6. The hash report
+
+`POST {REDBERRY_URL}/v1/agents/{agent_id}/hashes`
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <project token>`: 64 lowercase hex characters |
+| `X-Redberry-Key` | `<key_id>`: 32 lowercase hex characters, `hex(SHA-256(raw 32-byte Ed25519 public key)[0:16])` (VALP `hashing.key_id`) |
+| `X-Redberry-Signature` | `ed25519=<signature>`: standard padded base64 (RFC 4648 §4, 88 characters) of the 64-byte signature |
+| `Content-Type` | `application/json` |
+
+The body is canonical JSON (§3) of exactly these ten fields, and is at most 4,096 bytes:
+
+```json
+{"agent_id":"AGT-…","ended_at":"…Z","leaf_kind":"stored-bytes","sha256":"<64 hex>","size":5467,
+ "started_at":"…Z","store":"vercel-blob","stored":true,"trace_id":"<32 hex>","v":1}
+```
+
+`started_at` and `ended_at` are the document's own (§1), and `sha256` and `size` are those of §5. Because the body is canonical, a retry sends identical bytes and VALP answers 200 rather than 409.
+
+**Signature (VALP SUITE-1).** The signature is Ed25519 (RFC 8032, pure) over the 33 bytes `0x05 || SHA-256(body)`, where `body` is the raw request bytes. The key is `REDBERRY_SIGNING_KEY`: base64 of the PKCS8 DER private key (48 bytes, RFC 8410). `test/vectors/signature.json` was produced by VALP's own Python code (`valp_core.keys`, `valp_core.hashing`), and the TypeScript signature matches it byte for byte.
+
+**Replies.**
+
+| Reply | Meaning | What the package does |
+|---|---|---|
+| 201 `{leaf, window_start[, sample]}` | A new leaf | Counted as `recorded` |
+| 200 | The same body was already recorded (a retry) | Counted as `duplicate` |
+| 400, 401, 403, 404, 409, 413 | Refused | Final: logged and counted as `refused`, not retried |
+| 5xx, 429, network error | Transient | Retried: 3 attempts in all, waiting 0.5 s and then 2 s. Then counted as `reportFailed`. |
+
+**Pricing sample.** When a 200 or 201 reply carries `sample: {url, method, headers}`, the stored bytes are sent with `PUT` to `url` with exactly `headers`. The upload has the same retries as the report. A 412 means the sample is already there.
+
+All of this runs inside `waitUntil` from `@vercel/functions`, with OpenTelemetry tracing suppressed so that the package's own requests add no spans.
+
+## 7. Golden vectors
+
+`test/vectors/v1-*.json` each hold an input (the processor's span objects in any order, plus the agent, trace and finish), and the expected canonical JSON, gzip bytes (base64), SHA-256 and size. They are:
+
+- `v1-minimal`: two spans, given child first.
+- `v1-spike-refund-run`: the spike's real 32-span AI SDK 7 run, given in reverse order.
+- `v1-edge-cases`: key order across astral and private-use characters, escapes, number forms, equal start times and an open span cut at a deadline.
+
+`test/vectors/signature.json` is the Python-made signature vector. The tests also check that each vector's gzip unpacks with both fflate and Node's `zlib`, and that span order and key insertion order do not change the hash.
+
+## 8. When a trace is finalised, and for which agent
+
+**Finish rule.** The processor finalises a trace when all three hold: the local root span has ended, no span of the trace is open, and no new span started during `graceMs` (default 2 s). A span that starts during the grace period resets it. A span that starts or ends after finalisation is counted as late and ignored. It never produces a second document.
+
+**Escape hatches.** Each of these finalises a trace as `cut_short`. Open spans are included with `endTimeUnixNano: null`, and the trace is still stored and reported.
+
+- `hard_stop`: `hardStopMs` (default 60 s) after the root ended, if spans are still open.
+- `deadline`: when `deadlineMs` is set, `deadlineMarginMs` (default 5 s) before the earlier of two times: first span plus `deadlineMs`, and the invocation deadline from Vercel's `getDeadline()`. Verified live: a route with `maxDuration` 10 was cut at about 7 s with a 3 s margin, then stored and reported before the kill.
+- `shutdown`: the span processor's `shutdown()`. A trace that already meets the finish rule at that moment is `complete`.
+
+**Limitation.** A hard kill still loses the run. Examples are a function killed before the deadline timer fires (no `deadlineMs`, or a margin too small for the store and report), an out-of-memory crash, or an instance frozen without `waitUntil`. Nothing in-process survives that.
+
+**Filters.**
+
+- The processor runs only when `VERCEL_ENV` is `production`, unless `REDBERRY_ALL_ENVS=1`.
+- It runs only in the Node.js runtime, never on Edge.
+- By default, a trace is hashed only if it has an AI SDK span. That is a span with a `gen_ai.operation.name` attribute, a name starting `ai.`, or the scope `gen_ai` or `ai`.
+
+**Agent.** AI SDK 7 drops `metadata`, so the agent never comes from span attributes. It is decided here and then stamped on every span (§2.1). The package checks `agentsByRoute` (`REDBERRY_AGENTS`) against the root span's routes, in this order: `http.route`, `next.route`, then the URL path (`url.path`, or `http.target` / `http.url` without the query string). A key matches exactly, or, if it ends in `*`, as a prefix, and the longest prefix wins. If nothing matches, the package uses `agentId` (`REDBERRY_AGENT_ID`). If there is still no agent, the trace is skipped and counted (`skippedNoAgent`).
+
+## 9. Verifying a stored trace
+
+```text
+bytes  = read the stored object
+assert sha256(bytes) == leaf.body.sha256 and len(bytes) == leaf.body.size
+assert Ed25519.verify(project key, 0x05 || sha256(leaf.body as bytes), leaf.signature)
+doc    = JSON.parse(gunzip(bytes))
+assert doc.schema == "redberry.trace.v1"
+assert doc.agent_id == leaf.body.agent_id and doc.trace_id == leaf.body.trace_id
+assert doc.started_at == leaf.body.started_at and doc.ended_at == leaf.body.ended_at
+```
