@@ -1,7 +1,7 @@
 {
   "name": "@redberrylabs/otel",
-  "version": "0.1.1",
-  "description": "Hash, store and sign AI agent runs on Vercel for Redberry (VALP): an OpenTelemetry span processor.",
+  "version": "0.2.0",
+  "description": "Hash, store and sign AI agent runs on Vercel and Azure Functions for Redberry (VALP): an OpenTelemetry span processor.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -19,6 +19,16 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./node": {
+      "import": {
+        "types": "./dist/node.d.ts",
+        "default": "./dist/node.js"
+      },
+      "require": {
+        "types": "./dist/node.d.cts",
+        "default": "./dist/node.cjs"
       }
     },
     "./package.json": "./package.json"
@@ -45,10 +55,18 @@
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/context-async-hooks": "^2.0.0",
+    "@opentelemetry/resources": "^2.0.0",
     "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@vercel/blob": "^2.8.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/context-async-hooks": {
+      "optional": true
+    },
+    "@opentelemetry/resources": {
+      "optional": true
+    },
     "@vercel/blob": {
       "optional": true
     }
@@ -57,6 +75,7 @@
     "@eslint/js": "^10.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/context-async-hooks": "^2.12.0",
+    "@opentelemetry/resources": "^2.12.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@types/node": "^22.20.5",
     "@vercel/blob": "^2.8.2",

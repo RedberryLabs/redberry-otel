@@ -116,10 +116,18 @@ export const productionEnv = (extra: Record<string, string> = {}): Record<string
   ...extra,
 });
 
+/** An Azure Functions app's settings: WEBSITE_SITE_NAME and no VERCEL_ENV. */
+export const azureEnv = (extra: Record<string, string> = {}): Record<string, string> => {
+  const { VERCEL_ENV: _vercel, ...rest } = productionEnv();
+  return { ...rest, WEBSITE_SITE_NAME: 'refund-agent-app', FUNCTIONS_WORKER_RUNTIME: 'node', ...extra };
+};
+
+const PLATFORM_VARS = ['VERCEL', 'VERCEL_ENV', 'NEXT_RUNTIME', 'WEBSITE_SITE_NAME', 'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'VERCEL_OIDC_TOKEN'];
+
 /** Set process.env for one test; returns a restore function. */
 export function withEnv(env: Record<string, string | undefined>): () => void {
   const saved = { ...process.env };
-  for (const k of Object.keys(process.env)) if (k.startsWith('REDBERRY_') || k === 'VERCEL_ENV' || k === 'NEXT_RUNTIME') delete process.env[k];
+  for (const k of Object.keys(process.env)) if (k.startsWith('REDBERRY_') || PLATFORM_VARS.includes(k)) delete process.env[k];
   Object.assign(process.env, env);
   return () => {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];

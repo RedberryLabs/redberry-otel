@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { azureBlob, azureCredentialFor, BLOB_API_VERSION, containerUrlOf, LOGIN_URL } from '../src/stores/azure-blob';
 import { gcs, IAM_URL, STS_URL, UPLOAD_URL } from '../src/stores/gcs';
 import { redberry } from '../src/stores/redberry';
 import { StoreConflictError, type PutMeta } from '../src/stores/types';
@@ -102,6 +103,172 @@ describe('gcs (Vercel OIDC -> STS -> IAM Credentials -> JSON API upload)', () =>
 
   it('needs every option', () => {
     expect(() => gcs({ ...opts, bucket: '' })).toThrow(/bucket is required/);
+  });
+});
+
+describe('azureBlob (Vercel OIDC or managed identity -> Put Blob, If-None-Match: *)', () => {
+  const CONTAINER = 'https://acmetraces.blob.core.windows.net/redberry-runs';
+  const TENANT = '0f3a2b1c-1111-2222-3333-444455556666';
+  const CLIENT = '9e8d7c6b-aaaa-bbbb-cccc-ddddeeeeffff';
+  const MSI = 'http://localhost:8081/msi/token';
+  const blobUrl = `${CONTAINER}/${path}`;
+  const vercel = { containerUrl: CONTAINER, tenantId: TENANT, clientId: CLIENT, env: { VERCEL: '1' }, getOidcToken: async () => 'vercel-oidc-jwt', retryDelaysMs: [1, 1] };
+  const functionsEnv = { WEBSITE_SITE_NAME: 'refund-app', IDENTITY_ENDPOINT: MSI, IDENTITY_HEADER: 'identity-header-value' };
+
+  /** Entra ID, the managed-identity endpoint and Blob Storage, each answering with a token stamped by ``now``. */
+  function azure(now: () => number, upload: (c: { headers: Record<string, string> }, n: number) => Response = () => new Response(null, { status: 201 })) {
+    let uploads = 0;
+    return fakeFetch((c) => {
+      if (c.url.startsWith(LOGIN_URL)) return json(200, { token_type: 'Bearer', expires_in: 3599, access_token: `entra-${now()}` });
+      if (c.url.startsWith(MSI)) return json(200, { access_token: `msi-${now()}`, expires_on: String(Math.floor(now() / 1000) + 3600), resource: 'https://storage.azure.com/', token_type: 'Bearer' });
+      if (c.url.startsWith(CONTAINER)) return upload(c, ++uploads);
+      return json(404, {});
+    });
+  }
+
+  it('exchanges the Vercel OIDC token at Entra ID and puts create-only', async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    const f = azure(now);
+    const s = azureBlob({ ...vercel, fetch: f, now });
+    expect(s.kind).toBe('azure-blob');
+    expect(await s.put(path, bytes, meta)).toEqual({ url: blobUrl });
+
+    const [login, up] = f.calls;
+    expect(login).toMatchObject({ url: `${LOGIN_URL}${TENANT}/oauth2/v2.0/token`, method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    expect(Object.fromEntries(new URLSearchParams(new TextDecoder().decode(login!.body)))).toEqual({
+      grant_type: 'client_credentials',
+      client_id: CLIENT,
+      scope: 'https://storage.azure.com/.default',
+      client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+      client_assertion: 'vercel-oidc-jwt',
+    });
+    expect(up).toMatchObject({ url: blobUrl, method: 'PUT', body: bytes });
+    expect(up!.headers).toEqual({
+      authorization: 'Bearer entra-1000000',
+      'x-ms-version': BLOB_API_VERSION,
+      'x-ms-blob-type': 'BlockBlob',
+      'if-none-match': '*',
+      'content-type': 'application/gzip',
+      'x-ms-meta-sha256': meta.sha256,
+    });
+    expect(BLOB_API_VERSION).toBe('2023-11-03');
+
+    // Cached: a second put within the hour goes straight to Blob Storage.
+    t += 30 * 60_000;
+    await s.put(path, bytes, meta);
+    expect(f.calls.map((c) => new URL(c.url).host)).toEqual(['login.microsoftonline.com', 'acmetraces.blob.core.windows.net', 'acmetraces.blob.core.windows.net']);
+    // Within a minute of expiry: minted again.
+    t += 29.5 * 60_000;
+    await s.put(path, bytes, meta);
+    expect(f.calls).toHaveLength(5);
+    expect(f.calls[4]!.headers.authorization).toBe(`Bearer entra-${t}`);
+  });
+
+  it('asks the App Service / Functions managed-identity endpoint, with the identity header and client id', async () => {
+    let t = 2_000_000_000;
+    const now = () => t;
+    const f = azure(now);
+    const s = azureBlob({ containerUrl: CONTAINER, clientId: CLIENT, env: functionsEnv, fetch: f, now, retryDelaysMs: [1, 1] });
+    await s.put(path, bytes, meta);
+    const [msi, up] = f.calls;
+    expect(msi!.method).toBe('GET');
+    expect(msi!.headers['x-identity-header']).toBe('identity-header-value');
+    const u = new URL(msi!.url);
+    expect(`${u.origin}${u.pathname}`).toBe(MSI);
+    expect(Object.fromEntries(u.searchParams)).toEqual({ resource: 'https://storage.azure.com/', 'api-version': '2019-08-01', client_id: CLIENT });
+    expect(up!.headers.authorization).toBe(`Bearer msi-${t}`);
+    // expires_on is epoch seconds: still cached 58 minutes on, minted again at 59.5.
+    t += 58 * 60_000;
+    await s.put(path, bytes, meta);
+    expect(f.calls).toHaveLength(3);
+    t += 90_000;
+    await s.put(path, bytes, meta);
+    expect(f.calls).toHaveLength(5);
+
+    // A system-assigned identity: no client_id.
+    const g = azure(now);
+    await azureBlob({ containerUrl: CONTAINER, env: functionsEnv, fetch: g, now }).put(path, bytes, meta);
+    expect(new URL(g.calls[0]!.url).searchParams.has('client_id')).toBe(false);
+  });
+
+  it('picks the credential from where it runs', () => {
+    expect(azureCredentialFor(functionsEnv)).toBe('managed-identity');
+    expect(azureCredentialFor({ VERCEL: '1', VERCEL_ENV: 'production' })).toBe('vercel-oidc');
+    expect(azureCredentialFor({ WEBSITE_SITE_NAME: 'x' })).toBeUndefined();
+    expect(() => azureBlob({ containerUrl: CONTAINER, env: {} })).toThrow(/no Azure credential/);
+    expect(() => azureBlob({ ...vercel, tenantId: undefined })).toThrow(/AZURE_TENANT_ID/);
+    expect(() => azureBlob({ ...vercel, clientId: '' })).toThrow(/AZURE_CLIENT_ID/);
+    expect(() => azureBlob({ containerUrl: CONTAINER, credential: 'managed-identity', env: { VERCEL: '1' } })).toThrow(/IDENTITY_ENDPOINT/);
+  });
+
+  it('mints one token for concurrent puts', async () => {
+    const f = azure(() => 0);
+    const s = azureBlob({ ...vercel, fetch: f });
+    await Promise.all([s.put(path, bytes, meta), s.put(path, bytes, meta), s.put(path, bytes, meta)]);
+    expect(f.calls.filter((c) => c.url.startsWith(LOGIN_URL))).toHaveLength(1);
+  });
+
+  it('409 (BlobAlreadyExists) is a StoreConflictError', async () => {
+    const conflict = () => new Response('<Error><Code>BlobAlreadyExists</Code></Error>', { status: 409, headers: { 'x-ms-error-code': 'BlobAlreadyExists' } });
+    const s = azureBlob({ ...vercel, fetch: azure(() => 0, conflict) });
+    const err = await s.put(path, bytes, meta).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StoreConflictError);
+    expect(String((err as Error).message)).toMatch(/BlobAlreadyExists/);
+  });
+
+  it('401 drops the cached token, mints a new one and tries once more', async () => {
+    let t = 1_000_000;
+    const f = azure(() => t, (_c, n) => (n === 1 ? new Response('', { status: 401 }) : new Response(null, { status: 201 })));
+    const s = azureBlob({ ...vercel, fetch: f, now: () => t++ });
+    expect(await s.put(path, bytes, meta)).toEqual({ url: blobUrl });
+    const hosts = f.calls.map((c) => new URL(c.url).host);
+    expect(hosts).toEqual(['login.microsoftonline.com', 'acmetraces.blob.core.windows.net', 'login.microsoftonline.com', 'acmetraces.blob.core.windows.net']);
+    expect(f.calls[1]!.headers.authorization).not.toBe(f.calls[3]!.headers.authorization);
+
+    // Still 401 after a fresh token: an error, and the next put mints again.
+    const denied = azure(() => t, () => new Response('', { status: 401 }));
+    const d = azureBlob({ ...vercel, fetch: denied });
+    await expect(d.put(path, bytes, meta)).rejects.toThrow(/upload failed: HTTP 401/);
+    await expect(d.put(path, bytes, meta)).rejects.toThrow(/HTTP 401/);
+    expect(denied.calls.filter((c) => c.url.startsWith(LOGIN_URL))).toHaveLength(4);
+  });
+
+  it('a refused token request or upload is an error, and 5xx is retried', async () => {
+    const refused = fakeFetch(() => json(400, { error: 'invalid_client', error_description: 'AADSTS700213: No matching federated identity record found' }));
+    await expect(azureBlob({ ...vercel, fetch: refused }).put(path, bytes, meta)).rejects.toThrow(/Entra ID token request failed: HTTP 400.*AADSTS700213/);
+    const forbidden = azureBlob({ ...vercel, fetch: azure(() => 0, () => new Response('AuthorizationPermissionMismatch', { status: 403 })) });
+    await expect(forbidden.put(path, bytes, meta)).rejects.toThrow(/upload failed: HTTP 403/);
+    const flaky = azure(() => 0, (_c, n) => new Response(null, { status: n < 3 ? 503 : 201 }));
+    expect(await azureBlob({ ...vercel, fetch: flaky }).put(path, bytes, meta)).toEqual({ url: blobUrl });
+    expect(flaky.calls).toHaveLength(4);
+  });
+
+  it('accepts only https://<account>.blob.core.windows.net/<container>, and never echoes the URL', () => {
+    expect(containerUrlOf(CONTAINER)).toBe(CONTAINER);
+    expect(containerUrlOf(`${CONTAINER}/`)).toBe(CONTAINER);
+    for (const bad of [
+      'http://acmetraces.blob.core.windows.net/redberry-runs',
+      'https://acmetraces.blob.core.windows.net',
+      'https://acmetraces.blob.core.windows.net/redberry-runs/nested',
+      'https://acmetraces.blob.core.windows.net/Redberry',
+      'https://acmetraces.blob.core.windows.net/a--b',
+      'https://acmetraces.example.com/redberry-runs',
+      'https://acmetraces.blob.core.windows.net.evil.test/redberry-runs',
+      'not a url',
+    ]) expect(() => containerUrlOf(bad), bad).toThrow(/containerUrl/);
+    let message = '';
+    try {
+      containerUrlOf(`${CONTAINER}?sv=2022-11-02&sig=secret`);
+    } catch (e) {
+      message = String((e as Error).message);
+    }
+    expect(message).toMatch(/no SAS token/);
+    expect(message).not.toContain('secret');
+    // A test double or storage emulator, by explicit opt-in.
+    expect(containerUrlOf('http://127.0.0.1:10000/devstoreaccount1/runs', '127.0.0.1:10000')).toBe('http://127.0.0.1:10000/devstoreaccount1/runs');
+    expect(containerUrlOf('https://blob.test/runs', 'blob.test')).toBe('https://blob.test/runs');
+    expect(() => containerUrlOf('http://blob.test/runs', 'blob.test')).toThrow(/https/);
   });
 });
 
