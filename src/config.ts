@@ -115,7 +115,8 @@ export function platformOf(env: Env): Platform {
 /**
  * The store named by REDBERRY_STORE: ``redberry`` (the default, as in the CLI), ``vercel-blob``, ``gcs``
  * (with REDBERRY_GCS_BUCKET, GCP_PROJECT_NUMBER, GCP_WORKLOAD_POOL, GCP_WORKLOAD_PROVIDER, GCP_SERVICE_ACCOUNT)
- * or ``azure-blob`` (with REDBERRY_AZURE_CONTAINER_URL, AZURE_TENANT_ID, AZURE_CLIENT_ID).
+ * or ``azure-blob`` (with REDBERRY_AZURE_CONTAINER_URL, REDBERRY_AZURE_TENANT_ID and REDBERRY_AZURE_CLIENT_ID, or
+ * AZURE_TENANT_ID and AZURE_CLIENT_ID as fallbacks).
  */
 export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?: Fetch): Store {
   const kind = (env.REDBERRY_STORE || 'redberry').trim();
@@ -138,8 +139,10 @@ export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?:
       // The names `redberry connect --store azure-blob` sets (from `redberry setup-azure`).
       return azureBlob({
         containerUrl: env.REDBERRY_AZURE_CONTAINER_URL ?? '',
-        tenantId: env.AZURE_TENANT_ID || undefined,
-        clientId: env.AZURE_CLIENT_ID || undefined,
+        // REDBERRY_AZURE_* first: AZURE_CLIENT_ID app-wide would also change which identity the app's own
+        // DefaultAzureCredential uses.
+        tenantId: env.REDBERRY_AZURE_TENANT_ID || env.AZURE_TENANT_ID || undefined,
+        clientId: env.REDBERRY_AZURE_CLIENT_ID || env.AZURE_CLIENT_ID || undefined,
         env,
         fetch: fetchImpl,
       });

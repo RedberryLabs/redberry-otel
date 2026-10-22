@@ -18,11 +18,11 @@ export type AzureCredential = 'vercel-oidc' | 'managed-identity';
 export interface AzureBlobOptions {
   /** ``https://<account>.blob.core.windows.net/<container>``: no SAS, no trailing slash. Env: REDBERRY_AZURE_CONTAINER_URL. */
   containerUrl: string;
-  /** The Entra ID tenant; required with Vercel OIDC. Env: AZURE_TENANT_ID. */
+  /** The Entra ID tenant; required with Vercel OIDC. Env: REDBERRY_AZURE_TENANT_ID, else AZURE_TENANT_ID. */
   tenantId?: string;
   /**
    * The user-assigned managed identity's client id. Required with Vercel OIDC; with a managed identity,
-   * omit it to use the app's system-assigned identity. Env: AZURE_CLIENT_ID.
+   * omit it to use the app's system-assigned identity. Env: REDBERRY_AZURE_CLIENT_ID, else AZURE_CLIENT_ID.
    */
   clientId?: string;
   /**
@@ -101,8 +101,8 @@ export function azureBlob(options: AzureBlobOptions): Store {
     throw new Error('azureBlob(): no Azure credential here: needs Vercel (OIDC) or a managed identity (IDENTITY_ENDPOINT and IDENTITY_HEADER)');
   }
   if (credential === 'vercel-oidc') {
-    if (!options.tenantId) throw new Error('azureBlob(): tenantId (AZURE_TENANT_ID) is required with Vercel OIDC');
-    if (!options.clientId) throw new Error('azureBlob(): clientId (AZURE_CLIENT_ID) is required with Vercel OIDC');
+    if (!options.tenantId) throw new Error('azureBlob(): tenantId (REDBERRY_AZURE_TENANT_ID) is required with Vercel OIDC');
+    if (!options.clientId) throw new Error('azureBlob(): clientId (REDBERRY_AZURE_CLIENT_ID) is required with Vercel OIDC');
   }
   const identityEndpoint = env.IDENTITY_ENDPOINT;
   const identityHeader = env.IDENTITY_HEADER;

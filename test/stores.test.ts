@@ -197,8 +197,8 @@ describe('azureBlob (Vercel OIDC or managed identity -> Put Blob, If-None-Match:
     expect(azureCredentialFor({ VERCEL: '1', VERCEL_ENV: 'production' })).toBe('vercel-oidc');
     expect(azureCredentialFor({ WEBSITE_SITE_NAME: 'x' })).toBeUndefined();
     expect(() => azureBlob({ containerUrl: CONTAINER, env: {} })).toThrow(/no Azure credential/);
-    expect(() => azureBlob({ ...vercel, tenantId: undefined })).toThrow(/AZURE_TENANT_ID/);
-    expect(() => azureBlob({ ...vercel, clientId: '' })).toThrow(/AZURE_CLIENT_ID/);
+    expect(() => azureBlob({ ...vercel, tenantId: undefined })).toThrow(/REDBERRY_AZURE_TENANT_ID/);
+    expect(() => azureBlob({ ...vercel, clientId: '' })).toThrow(/REDBERRY_AZURE_CLIENT_ID/);
     expect(() => azureBlob({ containerUrl: CONTAINER, credential: 'managed-identity', env: { VERCEL: '1' } })).toThrow(/IDENTITY_ENDPOINT/);
   });
 
