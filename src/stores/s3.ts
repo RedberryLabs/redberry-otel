@@ -178,6 +178,8 @@ export function s3(options: S3Options): Store {
     async put(path, bytes, meta) {
       const url = `${base}/${uriEncode(path, true)}`;
       const payloadHash = sha256Hex(bytes);
+      // Object Lock buckets refuse a PUT without an integrity checksum (Content-MD5 or x-amz-checksum-*).
+      const checksum = Buffer.from(payloadHash, 'hex').toString('base64');
       const send = (creds: AwsCredentials) =>
         withRetries(() => {
           // Signed per attempt: the signature carries the time.
@@ -187,6 +189,7 @@ export function s3(options: S3Options): Store {
             headers: {
               'content-type': 'application/gzip',
               'if-none-match': '*',
+              'x-amz-checksum-sha256': checksum,
               'x-amz-content-sha256': payloadHash,
               'x-amz-meta-sha256': meta.sha256,
             },

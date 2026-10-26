@@ -330,11 +330,12 @@ describe('s3 (Vercel OIDC -> STS AssumeRoleWithWebIdentity, or Lambda env creden
       'content-type': 'application/gzip',
       'x-amz-meta-sha256': meta.sha256,
       'x-amz-content-sha256': createHash('sha256').update(bytes).digest('hex'),
+      'x-amz-checksum-sha256': createHash('sha256').update(bytes).digest('base64'),
       'x-amz-date': '20261026T120000Z',
       'x-amz-security-token': 'sts-token-1&more',
     });
     expect(put!.headers.authorization).toMatch(
-      /^AWS4-HMAC-SHA256 Credential=ASIASTS1\/20261026\/eu-west-1\/s3\/aws4_request, SignedHeaders=content-type;host;if-none-match;x-amz-content-sha256;x-amz-date;x-amz-meta-sha256;x-amz-security-token, Signature=[0-9a-f]{64}$/,
+      /^AWS4-HMAC-SHA256 Credential=ASIASTS1\/20261026\/eu-west-1\/s3\/aws4_request, SignedHeaders=content-type;host;if-none-match;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date;x-amz-meta-sha256;x-amz-security-token, Signature=[0-9a-f]{64}$/,
     );
   });
 
