@@ -17,7 +17,7 @@ One JSON object per trace (one request, one agent run):
 | `cut_reason` | string or null | `null` when `finish` is `"complete"`. Otherwise one of `"deadline"`, `"hard_stop"` or `"shutdown"`. |
 | `started_at` | string | The earliest span start, as ISO-8601 UTC with milliseconds, truncated (`YYYY-MM-DDTHH:MM:SS.mmmZ`). |
 | `ended_at` | string | The latest of: every ended span's end, every open span's start and, for `cut_short`, the moment of the cut. Same format. |
-| `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*` on Vercel, `cloud.*` on Azure, …). |
+| `resource` | object | The OpenTelemetry resource attributes of the root span, as emitted (`service.name`, `vercel.*` on Vercel, `cloud.*` on Azure and AWS Lambda, …). |
 | `spans` | array | Every span of the trace that the processor saw, in the order of §2.2. |
 | `dropped_spans` | integer | Spans not kept because the per-trace cap was reached (default cap 10,000). |
 | `producer` | object | `{ "name": "@redberrylabs/otel", "version": "<semver>" }`. `name` identifies the writer: another conforming writer, such as the Python hasher in `redberry-agent-sdk`, sets its own name and version. |
@@ -89,6 +89,7 @@ Anyone can decompress the bytes with any gunzip. Re-compressing to the same byte
 | `vercel-blob` | The customer's Vercel Blob store at the path above, with `access: "private"`, `addRandomSuffix: false`, `allowOverwrite: false`, `contentType: "application/gzip"` | Blob refuses a second `put` to the same path. This is no-overwrite, not immutability: the store's read-write token can delete. |
 | `gcs` | The customer's bucket at the path above. The JSON API multipart upload uses `ifGenerationMatch=0` and object metadata `sha256`. Credentials come from Vercel OIDC, then Google STS (pool `GCP_WORKLOAD_POOL`, provider `GCP_WORKLOAD_PROVIDER`, project `GCP_PROJECT_NUMBER`), then IAM Credentials `generateAccessToken` for `GCP_SERVICE_ACCOUNT`. | GCS refuses (412). Bucket retention gives immutability. |
 | `azure-blob` | The customer's Azure Blob Storage container (`REDBERRY_AZURE_CONTAINER_URL`, `https://<account>.blob.core.windows.net/<container>`) at the path above. Put Blob (`x-ms-version: 2023-11-03`, `x-ms-blob-type: BlockBlob`) with `If-None-Match: *`, `Content-Type: application/gzip` and metadata `x-ms-meta-sha256`. There is no storage key or SAS. On Vercel, the function's Vercel OIDC token is the client assertion in an Entra ID `client_credentials` request (`REDBERRY_AZURE_TENANT_ID`, `REDBERRY_AZURE_CLIENT_ID`, scope `https://storage.azure.com/.default`). On Azure Functions and App Service, the token comes from the managed-identity endpoint (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, with `REDBERRY_AZURE_CLIENT_ID` for a user-assigned identity). `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are read when the `REDBERRY_AZURE_*` names are unset, but the `REDBERRY_AZURE_*` names are recommended: `AZURE_CLIENT_ID` set app-wide also changes the identity the app's own `DefaultAzureCredential` uses. | Azure refuses (409 `BlobAlreadyExists`). The container's time-based immutability policy makes each object write-once: it cannot be changed or deleted until the retention period ends, even by the account owner once the policy is locked. Unlike Vercel Blob, this is immutability, not only no-overwrite. |
+| `s3` | The customer's Amazon S3 bucket (`REDBERRY_S3_BUCKET`, `<bucket>` or `s3://<bucket>`, in `REDBERRY_S3_REGION`) at the path above. A SigV4-signed `PUT https://<bucket>.s3.<region>.amazonaws.com/<path>` (path-style on `s3.<region>.amazonaws.com` for a bucket name with dots) with `If-None-Match: *`, `Content-Type: application/gzip`, `x-amz-content-sha256` (the SHA-256 of the body, signed), `x-amz-checksum-sha256` (the same digest, base64; S3 requires a checksum for a write to an Object Lock bucket) and metadata `x-amz-meta-sha256`. There is no long-lived AWS key. On Vercel, the function's Vercel OIDC token goes to AWS STS `AssumeRoleWithWebIdentity` (unsigned, `https://sts.<region>.amazonaws.com/`) for the role `REDBERRY_AWS_ROLE_ARN`; the temporary credentials are cached until five minutes before they expire, and a 401 or 403 on the PUT assumes the role again, once. On AWS Lambda, the execution role's credentials come from the environment Lambda sets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`). | S3 refuses (412 `PreconditionFailed`, or 409 `ConditionalRequestConflict` while a concurrent write is in flight). The bucket is created with S3 Object Lock and a default retention period, which makes each object version write-once: it cannot be changed or deleted until the retention ends (in compliance mode, not even by the account root user). As with `azure-blob`, this is immutability, not only no-overwrite. |
 | `redberry` | Redberry's bucket, under the object name VALP chooses (`agent=<id>/dt=<date>/<trace_id>…`), through a signed create-only PUT that VALP pins to this size and SHA-256 | VALP and GCS both refuse. A 412 on retry means the same bytes are already there. |
 
 `REDBERRY_STORE` picks the store, and the default is `redberry`, as in the CLI. If the store write fails, the report still goes out with `stored: false`.
@@ -155,6 +156,7 @@ On Vercel, all of this runs inside `waitUntil` from `@vercel/functions`. Outside
 - `REDBERRY_DISABLED=1` turns the processor off everywhere.
 - On Vercel (`VERCEL_ENV` set), the processor runs only when `VERCEL_ENV` is `production`, unless `REDBERRY_ALL_ENVS=1`.
 - On Azure App Service and Azure Functions (`WEBSITE_SITE_NAME` set, no `VERCEL_ENV`), it always runs. These platforms have no preview environments of their own.
+- On AWS Lambda (`AWS_LAMBDA_FUNCTION_NAME` set, no `VERCEL_ENV` or `WEBSITE_SITE_NAME`), it always runs.
 - Anywhere else (local development, CI), it runs only with `REDBERRY_ALL_ENVS=1`.
 - It runs only in the Node.js runtime, never on Edge.
 - By default, a trace is hashed only if it has an AI SDK span. That is a span with a `gen_ai.operation.name` attribute, a name starting `ai.`, or the scope `gen_ai` or `ai`.
@@ -188,3 +190,24 @@ A span that starts after the trace was finalised (work the handler did not await
 `registerRedberry(options?)`, from `@redberrylabs/otel/node`, registers once per process a tracer provider with `RedberryProcessor`, an AsyncLocalStorage context manager, and a resource with `service.name` (option `serviceName`, else `OTEL_SERVICE_NAME`, else `WEBSITE_SITE_NAME`). On Azure the resource also carries `cloud.provider: "azure"`, `cloud.platform` (`azure.functions` or `azure.app_service`), `cloud.region` and `faas.instance`. If another tracer provider is already registered, it stays in place and `RedberryProcessor` has to be added to that provider instead.
 
 The stored document, its bytes and the report are exactly those of §1 to §6: only the way the run is delimited and kept alive differs.
+
+## 11. AWS Lambda (Node.js)
+
+AWS Lambda freezes the execution environment as soon as the handler returns, so nothing may be left in the background. `withRedberry(handler, { agentId? })` wraps an async Lambda handler `async (event, context) => …` exactly as in §10, steps 1 to 5. Callback-style handlers are not supported. The second argument is recognised as a Lambda context by its `awsRequestId` and `functionName`. The root span is named after `context.functionName` and has these attributes:
+
+| Attribute | Value |
+|---|---|
+| `faas.name` | `context.functionName` |
+| `faas.invocation_id` | `context.awsRequestId` |
+| `faas.trigger` | `http` for an API Gateway REST event (payload 1.0: `httpMethod`, `path`), an API Gateway HTTP API event or a Lambda function URL event (payload 2.0: `requestContext.http.method`, `rawPath`), else `other` |
+| `cloud.provider`, `cloud.platform` | `aws`, `aws_lambda` |
+| `cloud.region` | `AWS_REGION`, else the region in `context.invokedFunctionArn` |
+| `cloud.account.id` | The account in `context.invokedFunctionArn`, when present |
+| `http.request.method`, `url.path` | For an HTTP event only. The path never includes the query string. |
+| `http.response.status_code` | The result's `statusCode` (or `status`), when it is a number |
+
+The span kind is `SERVER` for an HTTP event and `INTERNAL` otherwise. The wrapper waits (at most `flushTimeoutMs`) for the store write and the hash report before it returns, so both happen inside the invocation and count against the function's timeout.
+
+`registerRedberry()` on Lambda sets the resource's `service.name` from `AWS_LAMBDA_FUNCTION_NAME` when neither `serviceName` nor `OTEL_SERVICE_NAME` is given, and adds `cloud.provider: "aws"`, `cloud.platform: "aws_lambda"`, `cloud.region` (`AWS_REGION`), `faas.name`, `faas.version` (`AWS_LAMBDA_FUNCTION_VERSION`) and `faas.instance` (`AWS_LAMBDA_LOG_STREAM_NAME`).
+
+The stored document, its bytes and the report are exactly those of §1 to §6.

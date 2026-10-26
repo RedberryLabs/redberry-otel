@@ -122,7 +122,24 @@ export const azureEnv = (extra: Record<string, string> = {}): Record<string, str
   return { ...rest, WEBSITE_SITE_NAME: 'refund-agent-app', FUNCTIONS_WORKER_RUNTIME: 'node', ...extra };
 };
 
-const PLATFORM_VARS = ['VERCEL', 'VERCEL_ENV', 'NEXT_RUNTIME', 'WEBSITE_SITE_NAME', 'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'VERCEL_OIDC_TOKEN'];
+/** An AWS Lambda function's environment: what Lambda sets, and no VERCEL_ENV. */
+export const lambdaEnv = (extra: Record<string, string> = {}): Record<string, string> => {
+  const { VERCEL_ENV: _vercel, ...rest } = productionEnv();
+  return {
+    ...rest,
+    AWS_LAMBDA_FUNCTION_NAME: 'refund-agent',
+    AWS_LAMBDA_FUNCTION_VERSION: '$LATEST',
+    AWS_LAMBDA_LOG_STREAM_NAME: '2026/10/26/[$LATEST]0123456789abcdef0123456789abcdef',
+    AWS_REGION: 'eu-west-1',
+    AWS_ACCESS_KEY_ID: 'ASIAEXAMPLEEXECROLE1',
+    AWS_SECRET_ACCESS_KEY: 'exec-role-secret',
+    AWS_SESSION_TOKEN: 'exec-role-session-token',
+    ...extra,
+  };
+};
+
+const PLATFORM_VARS = ['VERCEL', 'VERCEL_ENV', 'NEXT_RUNTIME', 'WEBSITE_SITE_NAME', 'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'VERCEL_OIDC_TOKEN',
+  'AWS_LAMBDA_FUNCTION_NAME', 'AWS_LAMBDA_FUNCTION_VERSION', 'AWS_LAMBDA_LOG_STREAM_NAME', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'];
 
 /** Set process.env for one test; returns a restore function. */
 export function withEnv(env: Record<string, string | undefined>): () => void {

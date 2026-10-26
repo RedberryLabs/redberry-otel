@@ -1,7 +1,7 @@
 {
   "name": "@redberrylabs/otel",
-  "version": "0.2.0",
-  "description": "Hash, store and sign AI agent runs on Vercel and Azure Functions for Redberry (VALP): an OpenTelemetry span processor.",
+  "version": "0.3.0",
+  "description": "Hash, store and sign AI agent runs on Vercel, Azure Functions and AWS Lambda for Redberry (VALP): an OpenTelemetry span processor.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

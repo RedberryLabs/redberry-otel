@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { matchRoute, resolveAgent, routeCandidates } from '../src/agents';
 import { resolveConfig, storeFromEnv, type Logger } from '../src/config';
-import { AGENT, AGENT_B, azureEnv, fakeFetch, json, productionEnv, SIGNING_KEY, TOKEN } from './helpers';
+import { AGENT, AGENT_B, azureEnv, fakeFetch, lambdaEnv, json, productionEnv, SIGNING_KEY, TOKEN } from './helpers';
 
 // The azure-blob store's Vercel OIDC token, outside a Vercel function.
 vi.mock('@vercel/functions/oidc', () => ({ getVercelOidcToken: async () => 'vercel-oidc-jwt' }));
@@ -72,10 +72,34 @@ describe('resolveConfig', () => {
     expect(log.warnings).toEqual([]);
   });
 
+  it('runs on AWS Lambda (AWS_LAMBDA_FUNCTION_NAME) unless REDBERRY_DISABLED=1', () => {
+    const log = quiet();
+    expect(resolveConfig({ logger: log }, lambdaEnv())).toMatchObject({ enabled: true, platform: 'aws-lambda' });
+    expect(resolveConfig({ logger: log }, lambdaEnv({ REDBERRY_AGENT_ID: '' })).enabled).toBe(true); // withRedberry may name it
+    expect(resolveConfig({ logger: log }, lambdaEnv({ REDBERRY_DISABLED: '1' }))).toMatchObject({ enabled: false, disabledReason: 'REDBERRY_DISABLED=1' });
+    expect(log.warnings).toEqual([]);
+  });
+
+  it('builds the s3 store from the names `redberry connect --store s3` writes', async () => {
+    const names = { REDBERRY_STORE: 's3', REDBERRY_S3_BUCKET: 's3://acme-runs', REDBERRY_S3_REGION: 'eu-west-1' };
+    // Lambda: the execution role's credentials from the environment.
+    const f = fakeFetch(() => new Response(null, { status: 200 }));
+    const lambda = resolveConfig({ logger: quiet(), fetch: f }, lambdaEnv(names));
+    expect(lambda.store?.kind).toBe('s3');
+    await lambda.store!.put('redberry/a.json.gz', new Uint8Array([1]), { agentId: AGENT, traceId: 't', sha256: 'ab', size: 1 });
+    expect(f.calls[0]!.url).toBe('https://acme-runs.s3.eu-west-1.amazonaws.com/redberry/a.json.gz');
+    expect(f.calls[0]!.headers['x-amz-security-token']).toBe('exec-role-session-token');
+    // The region falls back to AWS_REGION (always set on Lambda).
+    expect(resolveConfig({ logger: quiet() }, lambdaEnv({ ...names, REDBERRY_S3_REGION: '' })).store?.kind).toBe('s3');
+    // Vercel: OIDC -> STS with the role.
+    const vercel = productionEnv({ ...names, VERCEL: '1', REDBERRY_AWS_ROLE_ARN: 'arn:aws:iam::123456789012:role/redberry-vercel-refund' });
+    expect(resolveConfig({ logger: quiet() }, vercel).store?.kind).toBe('s3');
+  });
+
   it('is off elsewhere (local development, CI) unless REDBERRY_ALL_ENVS=1', () => {
     const log = quiet();
     const { WEBSITE_SITE_NAME: _site, ...local } = azureEnv();
-    expect(resolveConfig({ logger: log }, local)).toMatchObject({ enabled: false, platform: 'other', disabledReason: expect.stringMatching(/not on Vercel or Azure/) });
+    expect(resolveConfig({ logger: log }, local)).toMatchObject({ enabled: false, platform: 'other', disabledReason: expect.stringMatching(/not on Vercel, Azure or AWS Lambda/) });
     expect(resolveConfig({ logger: log }, { ...local, REDBERRY_ALL_ENVS: '1' })).toMatchObject({ enabled: true, platform: 'other' });
     expect(log.warnings).toEqual([]);
   });
@@ -99,7 +123,9 @@ describe('resolveConfig', () => {
     [{ REDBERRY_PROJECT_TOKEN: 'short' }, /PROJECT_TOKEN/],
     [{ REDBERRY_SIGNING_KEY: '' }, /SIGNING_KEY/],
     [{ REDBERRY_KEY_ID: 'xyz' }, /KEY_ID/],
-    [{ REDBERRY_STORE: 's3' }, /REDBERRY_STORE must be/],
+    [{ REDBERRY_STORE: 'minio' }, /REDBERRY_STORE must be redberry, vercel-blob, gcs, azure-blob or s3/],
+    [{ REDBERRY_STORE: 's3', REDBERRY_S3_REGION: 'eu-west-1' }, /REDBERRY_S3_BUCKET/],
+    [{ REDBERRY_STORE: 's3', REDBERRY_S3_BUCKET: 'acme-runs', REDBERRY_S3_REGION: 'eu-west-1', VERCEL: '1' }, /no AWS credentials/],
     [{ REDBERRY_STORE: 'gcs' }, /bucket is required/],
   ])('disables itself with one warning for %j', (env, why) => {
     const log = quiet();
