@@ -1,4 +1,5 @@
-// @redberrylabs/otel/node: the OpenTelemetry set-up for Node.js outside Vercel (Azure Functions above all).
+// @redberrylabs/otel/node: the OpenTelemetry set-up for Node.js outside Vercel (Azure Functions and AWS
+// Lambda above all).
 // On Vercel, keep @vercel/otel's registerOTel with RedberryProcessor in its spanProcessors.
 //
 // registerRedberry() registers, once per process, a tracer provider that runs RedberryProcessor and an
@@ -15,7 +16,10 @@ import { RedberryProcessor } from './processor';
 export * from './index';
 
 export interface RegisterRedberryOptions extends RedberryOptions {
-  /** The resource's ``service.name``. Default: OTEL_SERVICE_NAME, else WEBSITE_SITE_NAME (the app's name). */
+  /**
+   * The resource's ``service.name``. Default: OTEL_SERVICE_NAME, else WEBSITE_SITE_NAME (the Azure app's
+   * name), else AWS_LAMBDA_FUNCTION_NAME.
+   */
   serviceName?: string;
   /** More span processors to run beside Redberry's (an exporter's, for example). */
   spanProcessors?: SpanProcessor[];
@@ -27,12 +31,21 @@ type Env = Record<string, string | undefined>;
 
 /** The resource every span carries, and so the stored trace's ``resource``. */
 export function resourceAttributes(env: Env, serviceName?: string): Attributes {
-  const a: Attributes = { 'service.name': serviceName || env.OTEL_SERVICE_NAME || env.WEBSITE_SITE_NAME || 'unknown_service:node' };
+  const a: Attributes = {
+    'service.name': serviceName || env.OTEL_SERVICE_NAME || env.WEBSITE_SITE_NAME || env.AWS_LAMBDA_FUNCTION_NAME || 'unknown_service:node',
+  };
   if (env.WEBSITE_SITE_NAME) {
     a['cloud.provider'] = 'azure';
     a['cloud.platform'] = env.FUNCTIONS_WORKER_RUNTIME ? 'azure.functions' : 'azure.app_service';
     if (env.REGION_NAME) a['cloud.region'] = env.REGION_NAME;
     if (env.WEBSITE_INSTANCE_ID) a['faas.instance'] = env.WEBSITE_INSTANCE_ID;
+  } else if (env.AWS_LAMBDA_FUNCTION_NAME) {
+    a['cloud.provider'] = 'aws';
+    a['cloud.platform'] = 'aws_lambda';
+    if (env.AWS_REGION) a['cloud.region'] = env.AWS_REGION;
+    a['faas.name'] = env.AWS_LAMBDA_FUNCTION_NAME;
+    if (env.AWS_LAMBDA_FUNCTION_VERSION) a['faas.version'] = env.AWS_LAMBDA_FUNCTION_VERSION;
+    if (env.AWS_LAMBDA_LOG_STREAM_NAME) a['faas.instance'] = env.AWS_LAMBDA_LOG_STREAM_NAME;
   }
   return a;
 }

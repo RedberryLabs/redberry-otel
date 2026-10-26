@@ -1,10 +1,10 @@
 # @redberrylabs/otel
 
-An OpenTelemetry span processor for AI agents on Vercel and Azure Functions (Node.js). For each agent run (one request or invocation, one trace), it:
+An OpenTelemetry span processor for AI agents on Vercel, Azure Functions and AWS Lambda (Node.js). For each agent run (one request or invocation, one trace), it:
 
 1. collects the spans and works out when the run has finished
 2. serialises the trace canonically and gzips it deterministically
-3. stores the bytes (private Vercel Blob, the customer's GCS bucket, the customer's Azure Blob Storage container, or Redberry's bucket)
+3. stores the bytes (private Vercel Blob, the customer's GCS bucket, the customer's Azure Blob Storage container, the customer's Amazon S3 bucket, or Redberry's bucket)
 4. signs a hash report with the project's Ed25519 key and sends it to VALP (`POST /v1/agents/{agent_id}/hashes`)
 
 VALP keeps each report as a create-once leaf and seals the leaves into chained five-minute windows. A stored trace can later be checked against that leaf. The bytes and the report are pinned in [SPEC.md](SPEC.md).
@@ -17,7 +17,7 @@ On Vercel:
 npm install @redberrylabs/otel @vercel/otel @vercel/functions @ai-sdk/otel
 ```
 
-On Azure Functions:
+On Azure Functions or AWS Lambda:
 
 ```sh
 npm install @redberrylabs/otel @ai-sdk/otel @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/context-async-hooks @opentelemetry/resources
@@ -30,9 +30,10 @@ npm install @redberrylabs/otel @ai-sdk/otel @opentelemetry/api @opentelemetry/sd
 - Node.js 22 or later. AI SDK 7 requires it, and Vercel functions run Node 24.
 - The **Node.js runtime only**. On Edge, the processor turns itself off: Edge is deprecated in Next 16, and AI Gateway OIDC failed there in the spike.
 - AI SDK 7 with `@ai-sdk/otel` registered. Without it there are no AI spans.
-- On Vercel, `@vercel/otel` (or any OpenTelemetry SDK that accepts span processors). On Azure Functions, the programming model v4 (`@azure/functions` 4.x) and `registerRedberry()` from `@redberrylabs/otel/node`.
+- On Vercel, `@vercel/otel` (or any OpenTelemetry SDK that accepts span processors). On Azure Functions, the programming model v4 (`@azure/functions` 4.x) and `registerRedberry()` from `@redberrylabs/otel/node`. On AWS Lambda, the Node.js 22 (or later) managed runtime, async handlers, and `registerRedberry()`.
 - For the `vercel-blob` store, a **private** Vercel Blob store connected to the project, which provides `BLOB_READ_WRITE_TOKEN`.
 - For the `azure-blob` store, the container and managed identity that `redberry setup-azure` creates.
+- For the `s3` store, the Object Lock bucket and the IAM role or policy that `redberry setup-aws` creates.
 
 ## Set-up (Next.js, AI SDK 7)
 
@@ -106,6 +107,35 @@ app.http('refund', { methods: ['POST'], handler: withRedberry(refund, { agentId:
 - `registerRedberry()` registers a global tracer provider. If the app already has one (the Azure Monitor OpenTelemetry distro, for example), add `new RedberryProcessor()` to that provider's span processors instead, and keep `withRedberry` on the handlers.
 - `@ai-sdk/otel` is an ES module. Use an ESM function app (`"type": "module"`), or Node 22.12 or later, which can `require` it.
 
+## Set-up (AWS Lambda, Node.js, AI SDK 7)
+
+Lambda freezes the function as soon as the handler returns, so, as on Azure Functions, each handler is wrapped: `withRedberry` stores and reports the run before it hands back the handler's result. Only async handlers `async (event, context) => …` are supported.
+
+```ts
+// index.mjs (or handler.ts)
+import { registerTelemetry, generateText } from 'ai';
+import { OpenTelemetry } from '@ai-sdk/otel';
+import { registerRedberry, withRedberry } from '@redberrylabs/otel/node';
+
+// Once per execution environment, outside the handler. service.name defaults to the function name.
+registerRedberry();
+registerTelemetry(new OpenTelemetry({ runtimeContext: true }));
+
+export const handler = withRedberry(
+  async (event, context) => {
+    const { text } = await generateText({ model: 'openai/gpt-4o-mini', prompt: event.body ?? '' });
+    return { statusCode: 200, body: JSON.stringify({ text }) };
+  },
+  { agentId: 'AGT-…' },
+);
+```
+
+Environment (Lambda function configuration): `REDBERRY_URL`, `REDBERRY_PROJECT_TOKEN`, `REDBERRY_SIGNING_KEY` (Lambda encrypts environment variables at rest with KMS), and for the customer's bucket `REDBERRY_STORE=s3`, `REDBERRY_S3_BUCKET` and `REDBERRY_S3_REGION`. The credentials are the execution role's, which Lambda provides; the role needs `s3:PutObject` on `arn:aws:s3:::<bucket>/redberry/*`, which `redberry setup-aws --function <name>` grants.
+
+- On Lambda (`AWS_LAMBDA_FUNCTION_NAME` set), the processor runs unless `REDBERRY_DISABLED=1`. Elsewhere (a local test harness) it stays off unless `REDBERRY_ALL_ENVS=1`.
+- The root span records `faas.name`, `faas.invocation_id` (`awsRequestId`), `faas.trigger` (`http` for API Gateway REST and HTTP APIs and function URLs, else `other`), `cloud.provider: aws`, `cloud.platform: aws_lambda` and `cloud.region`; for HTTP events, the method and the path without the query string.
+- The store write and report count against the function's timeout: allow a few seconds for them, and set `REDBERRY_DEADLINE_MS` to the timeout (ms) so a run still going near the end is cut short and stored rather than lost.
+
 You do not need `metadata: { agentId }` in AI SDK calls. AI SDK 7 drops `metadata`. The processor assigns each run to an agent from its own configuration (below). It records the agent in the stored trace and the report, and stamps it on every stored span as `redberry.agent_id`.
 
 ## Configuration
@@ -120,8 +150,8 @@ Every option can be set in the environment. An option passed to `new RedberryPro
 | `keyId` | `REDBERRY_KEY_ID` | derived from the key | If set, it is checked against the key |
 | `agentId` | `REDBERRY_AGENT_ID` | | The agent every trace belongs to, unless the route map matches |
 | `agentsByRoute` | `REDBERRY_AGENTS` (JSON) | | Route path to agent id, for example `{"/api/refund":"AGT-…"}` (the CLI writes this). Matched against the root span's `http.route`, `next.route` or URL path. A key matches exactly, or as a prefix if it ends in `*`. |
-| `store` | `REDBERRY_STORE` | `redberry` | `redberry`, `vercel-blob`, `gcs` or `azure-blob` (see Stores) |
-| `allEnvs` | `REDBERRY_ALL_ENVS=1` | off | Also run outside production. By default the processor runs on Vercel only when `VERCEL_ENV=production`, always on Azure App Service and Azure Functions (`WEBSITE_SITE_NAME` set), and nowhere else. |
+| `store` | `REDBERRY_STORE` | `redberry` | `redberry`, `vercel-blob`, `gcs`, `azure-blob` or `s3` (see Stores) |
+| `allEnvs` | `REDBERRY_ALL_ENVS=1` | off | Also run outside production. By default the processor runs on Vercel only when `VERCEL_ENV=production`, always on Azure App Service and Azure Functions (`WEBSITE_SITE_NAME` set) and on AWS Lambda (`AWS_LAMBDA_FUNCTION_NAME` set), and nowhere else. |
 | | `REDBERRY_DISABLED=1` | off | Turn the processor off everywhere |
 | `deadlineMs` | `REDBERRY_DEADLINE_MS` | unset | See Deadlines |
 | `deadlineMarginMs` | `REDBERRY_DEADLINE_MARGIN_MS` | 5000 | See Deadlines |
@@ -131,7 +161,7 @@ Every option can be set in the environment. An option passed to `new RedberryPro
 | `maxTraces`, `maxSpansPerTrace` | | 1000, 10000 | Memory caps. Traces or spans over a cap are dropped and counted. |
 | `logger` | `REDBERRY_DEBUG=1` | `console` | `REDBERRY_DEBUG=1` adds one debug line per trace |
 | `onResult` | | | Called once per finalised trace with its outcome |
-| `fetch` | | global `fetch` | Used for VALP, GCS, Azure Blob Storage and the Redberry store. Not used for Vercel Blob. |
+| `fetch` | | global `fetch` | Used for VALP, GCS, Azure Blob Storage, S3 and STS, and the Redberry store. Not used for Vercel Blob. |
 
 Agent ids are `AGT-` followed by a ULID. Anything else turns the processor off with a warning, because VALP would refuse it (404).
 
@@ -140,7 +170,7 @@ Agent ids are `AGT-` followed by a ULID. Anything else turns the processor off w
 ## Stores
 
 ```ts
-import { RedberryProcessor, vercelBlob, gcs, azureBlob, redberry } from '@redberrylabs/otel';
+import { RedberryProcessor, vercelBlob, gcs, azureBlob, s3, redberry } from '@redberrylabs/otel';
 
 new RedberryProcessor({ store: redberry() });     // the default: "Store logs with Redberry", VALP signs an upload URL
 new RedberryProcessor({ store: vercelBlob() });   // the project's private Blob store
@@ -149,6 +179,9 @@ new RedberryProcessor({
 });
 new RedberryProcessor({
   store: azureBlob({ containerUrl, tenantId, clientId }),  // the customer's Azure Blob Storage container
+});
+new RedberryProcessor({
+  store: s3({ bucket, region, roleArn }),  // the customer's S3 bucket (roleArn on Vercel only)
 });
 ```
 
@@ -159,6 +192,10 @@ new RedberryProcessor({
   - **On Azure Functions or App Service**: the platform's managed-identity endpoint (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, set by Azure). Environment: `REDBERRY_STORE=azure-blob`, `REDBERRY_AZURE_CONTAINER_URL` and `REDBERRY_AZURE_CLIENT_ID` (the identity assigned to the app; omit it to use the app's system-assigned identity).
   - `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are read as fallbacks when the `REDBERRY_AZURE_*` names are unset. Prefer the `REDBERRY_AZURE_*` names: `AZURE_CLIENT_ID` set for the whole app also changes which identity the app's own `DefaultAzureCredential` (`@azure/identity`) uses.
   *Unit-tested only so far.*
+- **`s3()`**: a SigV4-signed `PUT` with `If-None-Match: *` to the customer's bucket, so S3 itself refuses an overwrite (412, or 409 during a concurrent write). The bucket is created with S3 Object Lock and a default retention period, so each stored run is write-once until the retention ends. No AWS SDK is used, and there is no long-lived AWS key. The credentials follow where the code runs:
+  - **On Vercel**: the function's Vercel OIDC token is exchanged at AWS STS (`AssumeRoleWithWebIdentity`) for temporary credentials of the role `redberry setup-aws --vercel-team … --vercel-project …` creates, which trusts Vercel's OIDC provider for that project's production environment only. The credentials are cached until five minutes before they expire, and a 401 or 403 assumes the role again. Environment: `REDBERRY_STORE=s3` with `REDBERRY_S3_BUCKET` (`<bucket>` or `s3://<bucket>`), `REDBERRY_S3_REGION` and `REDBERRY_AWS_ROLE_ARN`. The processor stays in `instrumentation.ts` as above; only the environment changes.
+  - **On AWS Lambda (or anywhere with AWS credentials in the environment)**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, which Lambda sets from the execution role. Environment: `REDBERRY_STORE=s3`, `REDBERRY_S3_BUCKET` and `REDBERRY_S3_REGION` (defaults to `AWS_REGION`).
+  *Unit-tested only so far (SigV4 is checked against AWS's published examples).*
 - **`redberry()`**: sends `POST {REDBERRY_URL}/v1/agents/{agent}/stored-logs/upload-url` with the project token and `{run_id, sha256, size}`, then PUTs the bytes with exactly the headers VALP returns. *Unit-tested only so far. VALP has to accept the project token on that route; see below.*
 
 If the store fails, the hash is still reported, with `stored: false`.
@@ -172,7 +209,7 @@ The `waitUntil` work counts against the function's `maxDuration`. In the spike, 
 
 On Vercel, that per-invocation deadline is real. The live check confirmed it: a `maxDuration = 10` route was cut at about 7 s with a 3 s margin, then stored and reported before the kill, even though `REDBERRY_DEADLINE_MS` was 300000. So **set `REDBERRY_DEADLINE_MS` to your largest `maxDuration`** (in ms), and every route is cut at its own deadline. Keep the margin at a few seconds: store and report take about 0.5 s, but a retried report can take up to about 3 s.
 
-On Azure Functions there is no per-invocation deadline to read, so the first span plus `deadlineMs` is the only one: set `REDBERRY_DEADLINE_MS` to the app's `functionTimeout` (`host.json`) in ms. `withRedberry` stores and reports inside the invocation, so that time also counts against the timeout.
+On Azure Functions and AWS Lambda the package reads no per-invocation deadline, so the first span plus `deadlineMs` is the only one: set `REDBERRY_DEADLINE_MS` to the app's `functionTimeout` (`host.json`) or the Lambda function's timeout, in ms. `withRedberry` stores and reports inside the invocation, so that time also counts against the timeout.
 
 **Limitation:** a hard kill still loses the run. That covers no deadline set, a margin too small, an out-of-memory crash, or a frozen instance. Nothing in-process survives that. Leave headroom in `maxDuration`.
 
@@ -196,7 +233,7 @@ npm run build     # tsup: ESM + CJS + .d.ts in dist/
 ## What VALP and the CLI need, to match
 
 - **VALP `stored-logs/upload-url`** accepts only the agent's sink token (`X-VALP-Sink-Token`) today. The `redberry()` store sends `Authorization: Bearer <project token>`, so the route must accept a live project token for an agent in that project. VALP also names the object `….ndjson.gz`, but these bytes are one gzipped JSON document (SPEC §1), so `….json.gz` would be accurate.
-- **The CLI's environment already matches** this package: `REDBERRY_PROJECT_TOKEN`, `REDBERRY_URL`, `REDBERRY_SIGNING_KEY` (base64 PKCS8 DER), `REDBERRY_KEY_ID` (checked against the key), `REDBERRY_STORE`, `REDBERRY_AGENTS`, and the GCS and Azure names above. It could also set `REDBERRY_DEADLINE_MS` to the app's largest `maxDuration` (see Deadlines).
+- **The CLI's environment already matches** this package: `REDBERRY_PROJECT_TOKEN`, `REDBERRY_URL`, `REDBERRY_SIGNING_KEY` (base64 PKCS8 DER), `REDBERRY_KEY_ID` (checked against the key), `REDBERRY_STORE`, `REDBERRY_AGENTS`, and the GCS, Azure and S3 names above. It could also set `REDBERRY_DEADLINE_MS` to the app's largest `maxDuration` (see Deadlines).
 - **The CLI's dependency `github:RedberryLabs/redberry-otel`** builds on install (the `prepare` script runs tsup). It needs the package merged to `main`, and Vercel's build must be able to read this private repository. Until the package is published, or the repository is made readable to builds, a Vercel build of a customer app cannot install it.
 
 ## License

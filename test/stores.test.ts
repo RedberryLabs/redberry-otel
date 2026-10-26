@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { azureBlob, azureCredentialFor, BLOB_API_VERSION, containerUrlOf, LOGIN_URL } from '../src/stores/azure-blob';
 import { gcs, IAM_URL, STS_URL, UPLOAD_URL } from '../src/stores/gcs';
 import { redberry } from '../src/stores/redberry';
+import { bucketOf, parseAssumeRoleReply, regionOf, REFRESH_MARGIN_MS, s3, s3CredentialFor } from '../src/stores/s3';
 import { StoreConflictError, type PutMeta } from '../src/stores/types';
 import { vercelBlob } from '../src/stores/vercel-blob';
 import { AGENT, fakeFetch, json, TOKEN, URL_ } from './helpers';
@@ -269,6 +271,173 @@ describe('azureBlob (Vercel OIDC or managed identity -> Put Blob, If-None-Match:
     expect(containerUrlOf('http://127.0.0.1:10000/devstoreaccount1/runs', '127.0.0.1:10000')).toBe('http://127.0.0.1:10000/devstoreaccount1/runs');
     expect(containerUrlOf('https://blob.test/runs', 'blob.test')).toBe('https://blob.test/runs');
     expect(() => containerUrlOf('http://blob.test/runs', 'blob.test')).toThrow(/https/);
+  });
+});
+
+describe('s3 (Vercel OIDC -> STS AssumeRoleWithWebIdentity, or Lambda env credentials -> SigV4 PUT, If-None-Match: *)', () => {
+  const BUCKET = 'acme-redberry-runs';
+  const REGION = 'eu-west-1';
+  const ROLE = 'arn:aws:iam::123456789012:role/redberry-vercel-refund-agent';
+  const STS = `https://sts.${REGION}.amazonaws.com/`;
+  const OBJECT = `https://${BUCKET}.s3.${REGION}.amazonaws.com/${path}`;
+  const vercel = { bucket: `s3://${BUCKET}`, region: REGION, roleArn: ROLE, env: { VERCEL: '1' }, getOidcToken: async () => 'vercel-oidc-jwt', retryDelaysMs: [1, 1] };
+  const lambda = { AWS_ACCESS_KEY_ID: 'ASIAEXECROLE', AWS_SECRET_ACCESS_KEY: 'exec-secret', AWS_SESSION_TOKEN: 'exec-token', AWS_LAMBDA_FUNCTION_NAME: 'refund' };
+
+  const stsReply = (n: number, expiresAt: number) =>
+    new Response(
+      `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>ASIASTS${n}</AccessKeyId>
+      <SecretAccessKey>sts-secret-${n}</SecretAccessKey>
+      <SessionToken>sts-token-${n}&amp;more</SessionToken>
+      <Expiration>${new Date(expiresAt).toISOString()}</Expiration>
+    </Credentials>
+    <AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/redberry-vercel-refund-agent/redberry-otel</Arn></AssumedRoleUser>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`,
+      { status: 200, headers: { 'content-type': 'text/xml' } },
+    );
+
+  /** STS and S3, STS answering credentials valid for an hour from ``now``. */
+  function aws(now: () => number, upload: (c: { headers: Record<string, string> }, n: number) => Response = () => new Response(null, { status: 200 })) {
+    let uploads = 0;
+    let assumed = 0;
+    return fakeFetch((c) => {
+      if (c.url === STS) return stsReply(++assumed, now() + 3_600_000);
+      if (c.url.startsWith(`https://${BUCKET}.s3.`)) return upload(c, ++uploads);
+      return json(404, {});
+    });
+  }
+
+  it('assumes the role with the Vercel OIDC token (unsigned) and puts create-only, SigV4-signed', async () => {
+    const t = Date.parse('2026-10-26T12:00:00Z');
+    const f = aws(() => t);
+    const s = s3({ ...vercel, fetch: f, now: () => t });
+    expect(s.kind).toBe('s3');
+    expect(await s.put(path, bytes, meta)).toEqual({ url: `s3://${BUCKET}/${path}` });
+    const [sts, put] = f.calls;
+    expect(sts!.method).toBe('POST');
+    expect(sts!.headers.authorization).toBeUndefined();
+    expect(Object.fromEntries(new URLSearchParams(new TextDecoder().decode(sts!.body)))).toEqual({
+      Action: 'AssumeRoleWithWebIdentity', Version: '2011-06-15', RoleArn: ROLE, RoleSessionName: 'redberry-otel', WebIdentityToken: 'vercel-oidc-jwt',
+    });
+    expect(put!.url).toBe(OBJECT);
+    expect(put!.method).toBe('PUT');
+    expect(put!.body).toEqual(bytes);
+    expect(put!.headers).toMatchObject({
+      'if-none-match': '*',
+      'content-type': 'application/gzip',
+      'x-amz-meta-sha256': meta.sha256,
+      'x-amz-content-sha256': createHash('sha256').update(bytes).digest('hex'),
+      'x-amz-date': '20261026T120000Z',
+      'x-amz-security-token': 'sts-token-1&more',
+    });
+    expect(put!.headers.authorization).toMatch(
+      /^AWS4-HMAC-SHA256 Credential=ASIASTS1\/20261026\/eu-west-1\/s3\/aws4_request, SignedHeaders=content-type;host;if-none-match;x-amz-content-sha256;x-amz-date;x-amz-meta-sha256;x-amz-security-token, Signature=[0-9a-f]{64}$/,
+    );
+  });
+
+  it('caches the credentials until five minutes before they expire, and assumes the role once for concurrent puts', async () => {
+    let t = Date.parse('2026-10-26T12:00:00Z');
+    const f = aws(() => t);
+    const s = s3({ ...vercel, fetch: f, now: () => t });
+    await Promise.all([s.put(path, bytes, meta), s.put(path, bytes, meta), s.put(path, bytes, meta)]);
+    expect(f.calls.filter((c) => c.url === STS)).toHaveLength(1);
+    t += 3_600_000 - REFRESH_MARGIN_MS - 1000;
+    await s.put(path, bytes, meta);
+    expect(f.calls.filter((c) => c.url === STS)).toHaveLength(1);
+    t += 2000;
+    await s.put(path, bytes, meta);
+    expect(f.calls.filter((c) => c.url === STS)).toHaveLength(2);
+    expect(f.calls.at(-1)!.headers['x-amz-security-token']).toBe('sts-token-2&more');
+  });
+
+  it('401 or 403 drops the cached credentials, assumes the role again and tries once more', async () => {
+    const t = Date.parse('2026-10-26T12:00:00Z');
+    const f = aws(() => t, (_c, n) => (n === 1 ? new Response('<Error><Code>ExpiredToken</Code></Error>', { status: 403 }) : new Response(null, { status: 200 })));
+    const s = s3({ ...vercel, fetch: f, now: () => t });
+    await s.put(path, bytes, meta);
+    expect(f.calls.map((c) => new URL(c.url).host)).toEqual([`sts.${REGION}.amazonaws.com`, `${BUCKET}.s3.${REGION}.amazonaws.com`, `sts.${REGION}.amazonaws.com`, `${BUCKET}.s3.${REGION}.amazonaws.com`]);
+    expect(f.calls[3]!.headers['x-amz-security-token']).toBe('sts-token-2&more');
+
+    const denied = aws(() => t, () => new Response('<Error><Code>AccessDenied</Code></Error>', { status: 403 }));
+    const d = s3({ ...vercel, fetch: denied, now: () => t });
+    await expect(d.put(path, bytes, meta)).rejects.toThrow(/upload failed: HTTP 403.*AccessDenied/);
+    await expect(d.put(path, bytes, meta)).rejects.toThrow(/HTTP 403/);
+    expect(denied.calls.filter((c) => c.url === STS)).toHaveLength(4);
+  });
+
+  it('412 (PreconditionFailed) and 409 (ConditionalRequestConflict) are StoreConflictErrors', async () => {
+    for (const [status, code] of [[412, 'PreconditionFailed'], [409, 'ConditionalRequestConflict']] as const) {
+      const s = s3({ ...vercel, fetch: aws(() => 0, () => new Response(`<Error><Code>${code}</Code></Error>`, { status })) });
+      const err = await s.put(path, bytes, meta).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(StoreConflictError);
+      expect(String((err as Error).message)).toContain(code);
+    }
+  });
+
+  it('on Lambda signs with the execution role credentials from the environment, with no STS call', async () => {
+    const t = Date.parse('2026-10-26T12:00:00Z');
+    const f = aws(() => t);
+    const s = s3({ bucket: BUCKET, region: REGION, env: lambda, fetch: f, now: () => t });
+    await s.put(path, bytes, meta);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.headers['x-amz-security-token']).toBe('exec-token');
+    expect(f.calls[0]!.headers.authorization).toContain('Credential=ASIAEXECROLE/20261026/eu-west-1/s3/aws4_request');
+    // A 403 with env credentials is final: there is nothing to refresh.
+    const denied = aws(() => t, () => new Response('', { status: 403 }));
+    await expect(s3({ bucket: BUCKET, region: REGION, env: lambda, fetch: denied }).put(path, bytes, meta)).rejects.toThrow(/HTTP 403/);
+    expect(denied.calls).toHaveLength(1);
+  });
+
+  it('picks the credential from the environment, and refuses a missing or invalid setting', () => {
+    expect(s3CredentialFor({ VERCEL: '1' }, ROLE)).toBe('vercel-oidc');
+    expect(s3CredentialFor({ VERCEL: '1', ...lambda }, ROLE)).toBe('vercel-oidc');
+    expect(s3CredentialFor(lambda)).toBe('env');
+    expect(s3CredentialFor({ VERCEL: '1' })).toBeUndefined();
+    expect(() => s3({ bucket: BUCKET, region: REGION, env: {} })).toThrow(/no AWS credentials/);
+    expect(() => s3({ ...vercel, bucket: '' })).toThrow(/REDBERRY_S3_BUCKET/);
+    expect(() => s3({ ...vercel, region: '' })).toThrow(/REDBERRY_S3_REGION/);
+    expect(() => s3({ ...vercel, credential: 'vercel-oidc', roleArn: undefined })).toThrow(/REDBERRY_AWS_ROLE_ARN/);
+    expect(() => s3({ ...vercel, roleArn: 'arn:aws:iam::123:user/x' })).toThrow(/role ARN/);
+    expect(() => s3({ ...vercel, credential: 'env' })).toThrow(/AWS_ACCESS_KEY_ID/);
+  });
+
+  it('a refused STS call or upload is an error, and 5xx is retried', async () => {
+    const refused = fakeFetch(() => new Response('<ErrorResponse><Error><Code>InvalidIdentityToken</Code></Error></ErrorResponse>', { status: 400 }));
+    await expect(s3({ ...vercel, fetch: refused }).put(path, bytes, meta)).rejects.toThrow(/AssumeRoleWithWebIdentity failed: HTTP 400.*InvalidIdentityToken/);
+    const empty = fakeFetch(() => new Response('<AssumeRoleWithWebIdentityResponse/>', { status: 200 }));
+    await expect(s3({ ...vercel, fetch: empty }).put(path, bytes, meta)).rejects.toThrow(/no credentials/);
+    const flaky = aws(() => 0, (_c, n) => new Response(null, { status: n < 3 ? 503 : 200 }));
+    expect(await s3({ ...vercel, fetch: flaky }).put(path, bytes, meta)).toEqual({ url: `s3://${BUCKET}/${path}` });
+    expect(flaky.calls).toHaveLength(4);
+  });
+
+  it('validates bucket names and regions; dotted buckets go path-style; an endpoint override for tests', async () => {
+    expect(bucketOf('s3://acme-runs')).toBe('acme-runs');
+    expect(bucketOf('acme.runs')).toBe('acme.runs');
+    for (const bad of ['ab', 'Acme', 'acme_runs', '-acme', 'acme-', 'a..b', '192.168.1.1', 'xn--acme', 'a'.repeat(64), 'https://acme']) {
+      expect(() => bucketOf(bad), bad).toThrow(/bucket/);
+    }
+    for (const ok of ['us-east-1', 'eu-central-2', 'us-gov-west-1', 'ap-southeast-4']) expect(regionOf(ok)).toBe(ok);
+    for (const bad of ['us-east', 'EU-WEST-1', 'eu-west-1.evil', '']) expect(() => regionOf(bad), bad).toThrow(/region/);
+
+    const dotted = fakeFetch(() => new Response(null, { status: 200 }));
+    await s3({ bucket: 'acme.runs', region: REGION, env: lambda, fetch: dotted }).put(path, bytes, meta);
+    expect(dotted.calls[0]!.url).toBe(`https://s3.${REGION}.amazonaws.com/acme.runs/${path}`);
+
+    const local = fakeFetch(() => new Response(null, { status: 200 }));
+    await s3({ bucket: BUCKET, region: REGION, env: lambda, fetch: local, endpoint: 'http://127.0.0.1:9000' }).put(path, bytes, meta);
+    expect(local.calls[0]!.url).toBe(`http://127.0.0.1:9000/${BUCKET}/${path}`);
+    expect(local.calls[0]!.headers.authorization).toMatch(/SignedHeaders=content-type;host;/);
+  });
+
+  it('parses the STS reply', () => {
+    expect(parseAssumeRoleReply('<x/>')).toBeUndefined();
+    expect(parseAssumeRoleReply('<Credentials><AccessKeyId>A</AccessKeyId><SecretAccessKey>S&lt;</SecretAccessKey><SessionToken>T</SessionToken><Expiration>2026-10-26T13:00:00Z</Expiration></Credentials>')).toEqual({
+      accessKeyId: 'A', secretAccessKey: 'S<', sessionToken: 'T', expiration: Date.parse('2026-10-26T13:00:00Z'),
+    });
   });
 });
 

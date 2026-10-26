@@ -6,6 +6,7 @@ import type { TraceResult } from './processor';
 import { azureBlob } from './stores/azure-blob';
 import { gcs } from './stores/gcs';
 import { redberry } from './stores/redberry';
+import { s3 } from './stores/s3';
 import type { Store } from './stores/types';
 import { vercelBlob } from './stores/vercel-blob';
 
@@ -21,7 +22,7 @@ export interface RedberryOptions {
   agentId?: string;
   /** Route -> agent id, matched against the root span's http.route / next.route / URL path. Env: REDBERRY_AGENTS (JSON). */
   agentsByRoute?: Record<string, string>;
-  /** Where the bytes go. Env: REDBERRY_STORE = redberry (default) | vercel-blob | gcs | azure-blob. */
+  /** Where the bytes go. Env: REDBERRY_STORE = redberry (default) | vercel-blob | gcs | azure-blob | s3. */
   store?: Store;
   /** VALP base URL. Env: REDBERRY_URL. */
   url?: string;
@@ -32,8 +33,8 @@ export interface RedberryOptions {
   /** Checked against the key when given; derived from it otherwise. Env: REDBERRY_KEY_ID. */
   keyId?: string;
   /**
-   * Run in every Vercel environment, not only production, and anywhere else that is neither Vercel nor
-   * Azure App Service / Functions. Env: REDBERRY_ALL_ENVS=1.
+   * Run in every Vercel environment, not only production, and anywhere else that is neither Vercel, Azure
+   * App Service / Functions nor AWS Lambda. Env: REDBERRY_ALL_ENVS=1.
    */
   allEnvs?: boolean;
   /** Quiet period after the root ends and nothing is open, before finalising (ms, default 2000). */
@@ -62,7 +63,7 @@ export interface RedberryOptions {
 }
 
 /** Where the processor runs: decides the enablement rule and how background work is kept alive. */
-export type Platform = 'vercel' | 'azure' | 'other';
+export type Platform = 'vercel' | 'azure' | 'aws-lambda' | 'other';
 
 export interface ResolvedConfig {
   enabled: boolean;
@@ -105,10 +106,14 @@ export const defaultLogger: Logger = {
   error: (...a) => console.error('[redberry]', ...a),
 };
 
-/** Vercel when VERCEL_ENV (or VERCEL) is set; Azure App Service / Functions when WEBSITE_SITE_NAME is. */
+/**
+ * Vercel when VERCEL_ENV (or VERCEL) is set; Azure App Service / Functions when WEBSITE_SITE_NAME is; AWS
+ * Lambda when AWS_LAMBDA_FUNCTION_NAME is.
+ */
 export function platformOf(env: Env): Platform {
   if (env.VERCEL_ENV || env.VERCEL) return 'vercel';
   if (env.WEBSITE_SITE_NAME) return 'azure';
+  if (env.AWS_LAMBDA_FUNCTION_NAME) return 'aws-lambda';
   return 'other';
 }
 
@@ -116,7 +121,8 @@ export function platformOf(env: Env): Platform {
  * The store named by REDBERRY_STORE: ``redberry`` (the default, as in the CLI), ``vercel-blob``, ``gcs``
  * (with REDBERRY_GCS_BUCKET, GCP_PROJECT_NUMBER, GCP_WORKLOAD_POOL, GCP_WORKLOAD_PROVIDER, GCP_SERVICE_ACCOUNT)
  * or ``azure-blob`` (with REDBERRY_AZURE_CONTAINER_URL, REDBERRY_AZURE_TENANT_ID and REDBERRY_AZURE_CLIENT_ID, or
- * AZURE_TENANT_ID and AZURE_CLIENT_ID as fallbacks).
+ * AZURE_TENANT_ID and AZURE_CLIENT_ID as fallbacks) or ``s3`` (with REDBERRY_S3_BUCKET, REDBERRY_S3_REGION and,
+ * on Vercel, REDBERRY_AWS_ROLE_ARN).
  */
 export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?: Fetch): Store {
   const kind = (env.REDBERRY_STORE || 'redberry').trim();
@@ -146,8 +152,18 @@ export function storeFromEnv(env: Env, url?: string, token?: string, fetchImpl?:
         env,
         fetch: fetchImpl,
       });
+    case 's3':
+      // The names `redberry connect --store s3` sets (from `redberry setup-aws`). On Lambda, the execution
+      // role's credentials come from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN.
+      return s3({
+        bucket: env.REDBERRY_S3_BUCKET ?? '',
+        region: env.REDBERRY_S3_REGION || env.AWS_REGION || '',
+        roleArn: env.REDBERRY_AWS_ROLE_ARN || undefined,
+        env,
+        fetch: fetchImpl,
+      });
     default:
-      throw new Error(`REDBERRY_STORE must be redberry, vercel-blob, gcs or azure-blob, not ${JSON.stringify(kind)}`);
+      throw new Error(`REDBERRY_STORE must be redberry, vercel-blob, gcs, azure-blob or s3, not ${JSON.stringify(kind)}`);
   }
 }
 
@@ -183,14 +199,14 @@ export function resolveConfig(o: RedberryOptions = {}, env: Env = process.env): 
 
   if (env.NEXT_RUNTIME === 'edge') return off('the Edge runtime is not supported; register RedberryProcessor in the Node.js runtime only');
   if (env.REDBERRY_DISABLED === '1') return off('REDBERRY_DISABLED=1', false);
-  // Vercel: production only. Azure App Service / Functions: always (it has no preview environments of its
-  // own). Anywhere else (local development, CI): off.
+  // Vercel: production only. Azure App Service / Functions and AWS Lambda: always (they have no preview
+  // environments of their own). Anywhere else (local development, CI): off.
   const allEnvs = o.allEnvs ?? env.REDBERRY_ALL_ENVS === '1';
   if (!allEnvs && platform === 'vercel' && env.VERCEL_ENV !== 'production') {
     return off(`not production (VERCEL_ENV=${env.VERCEL_ENV ?? 'unset'}); set REDBERRY_ALL_ENVS=1 to run here`, false);
   }
   if (!allEnvs && platform === 'other') {
-    return off('not on Vercel or Azure (VERCEL_ENV and WEBSITE_SITE_NAME unset); set REDBERRY_ALL_ENVS=1 to run here', false);
+    return off('not on Vercel, Azure or AWS Lambda (VERCEL_ENV, WEBSITE_SITE_NAME and AWS_LAMBDA_FUNCTION_NAME unset); set REDBERRY_ALL_ENVS=1 to run here', false);
   }
 
   let agentsByRoute = o.agentsByRoute;

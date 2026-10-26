@@ -1,5 +1,5 @@
 // withRedberry: one invocation of a handler as one agent run, for runtimes without Vercel's waitUntil (Azure
-// Functions above all). It opens the invocation's root span, runs the handler inside it so the AI SDK's spans
+// Functions and AWS Lambda above all; Lambda freezes the environment as soon as the handler returns). It opens the invocation's root span, runs the handler inside it so the AI SDK's spans
 // join that trace, and once the handler has settled, ends the root, has the processor finalise the trace at
 // once (no grace period: the root is ours and nothing else is open) and waits for the store write and the
 // signed hash report before handing back the handler's own result. The wait is bounded, so a slow store
@@ -19,7 +19,7 @@ export const DEFAULT_FLUSH_TIMEOUT_MS = 10_000;
 export interface WithRedberryOptions {
   /** The agent this handler's runs belong to. Wins over REDBERRY_AGENTS and REDBERRY_AGENT_ID. */
   agentId?: string;
-  /** The root span's name. Default: the Azure Functions function name, else the handler's name. */
+  /** The root span's name. Default: the Azure Functions or AWS Lambda function name, else the handler's name. */
   name?: string;
   /** The longest the wrapper waits, after the handler, for the store write and hash report (ms, default 10000). */
   flushTimeoutMs?: number;
@@ -34,6 +34,57 @@ interface InvocationContextLike {
   invocationId: string;
   functionName: string;
   options?: { trigger?: { type?: unknown } };
+}
+
+/** The Node.js Lambda runtime's context object (the fields read here). */
+interface LambdaContextLike {
+  awsRequestId: string;
+  functionName: string;
+  invokedFunctionArn?: string;
+}
+
+const isLambdaContext = (v: unknown): v is LambdaContextLike =>
+  isObject(v) && typeof v.awsRequestId === 'string' && typeof v.functionName === 'string';
+
+/**
+ * The method and path of an HTTP event: API Gateway REST (payload 1.0: httpMethod, path), API Gateway HTTP
+ * API (payload 2.0) and Lambda function URLs (requestContext.http.method, rawPath). The query string is never
+ * read: it can carry keys.
+ */
+function lambdaHttp(event: unknown): { method: string; path?: string } | undefined {
+  if (!isObject(event)) return undefined;
+  const rc = isObject(event.requestContext) ? event.requestContext : undefined;
+  const http = rc && isObject(rc.http) ? rc.http : undefined;
+  if (http && typeof http.method === 'string') {
+    const path = typeof event.rawPath === 'string' ? event.rawPath : typeof http.path === 'string' ? http.path : undefined;
+    return { method: http.method, path };
+  }
+  if (rc && typeof event.httpMethod === 'string') {
+    return { method: event.httpMethod, path: typeof event.path === 'string' ? event.path : undefined };
+  }
+  return undefined;
+}
+
+/** The root span's name, kind and attributes for a Lambda invocation ``(event, context)``. */
+function describeLambda(event: unknown, ctx: LambdaContextLike): { name: string; kind: SpanKind; attributes: Attributes } {
+  const env = process.env;
+  const arn = ctx.invokedFunctionArn?.split(':') ?? [];
+  const attributes: Attributes = {
+    'faas.name': ctx.functionName,
+    'faas.invocation_id': ctx.awsRequestId,
+    'cloud.provider': 'aws',
+    'cloud.platform': 'aws_lambda',
+  };
+  const region = env.AWS_REGION || arn[3];
+  if (region) attributes['cloud.region'] = region;
+  if (arn[4] && /^\d{12}$/.test(arn[4])) attributes['cloud.account.id'] = arn[4];
+  const http = lambdaHttp(event);
+  attributes['faas.trigger'] = http ? 'http' : 'other';
+  if (http) {
+    attributes['http.request.method'] = http.method;
+    if (http.path) attributes['url.path'] = http.path.split('?')[0]!;
+  }
+  return { name: ctx.functionName, kind: http ? SpanKind.SERVER : SpanKind.INTERNAL, attributes };
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
@@ -55,6 +106,8 @@ function faasTrigger(type: unknown): string {
 
 /** The root span's name, kind and attributes, from the handler's arguments. */
 function describeInvocation(args: unknown[], fallbackName: string): { name: string; kind: SpanKind; attributes: Attributes } {
+  const lambda = isLambdaContext(args[1]) ? args[1] : undefined;
+  if (lambda) return describeLambda(args[0], lambda);
   const attributes: Attributes = {};
   const request = args.find(isHttpRequest);
   const ctx = args.find(isInvocationContext);
@@ -99,8 +152,8 @@ async function flush(traceId: string, ms: number): Promise<void> {
 }
 
 /**
- * Wrap an Azure Functions v4 handler ``(request, context) => …`` (or any function) so that each invocation
- * is one trace, hashed, stored and reported before the wrapper returns. The handler's result is returned
+ * Wrap an Azure Functions v4 handler ``(request, context) => …``, an async AWS Lambda handler
+ * ``async (event, context) => …`` (or any function) so that each invocation is one trace, hashed, stored and reported before the wrapper returns. The handler's result is returned
  * unchanged, and an error it throws is rethrown, after the flush. Without a registered tracer provider
  * (``registerRedberry()``) or with the processor disabled, the handler simply runs.
  */
@@ -122,7 +175,8 @@ export function withRedberry<A extends unknown[], R>(handler: (...args: A) => R,
     let result: Awaited<R> | undefined;
     try {
       result = await context.with(trace.setSpan(context.active(), span), () => handler.apply(this, args));
-      const status = isObject(result) ? result.status : undefined;
+      // Azure Functions: status. API Gateway and function URLs: statusCode.
+      const status = isObject(result) ? (result.status ?? result.statusCode) : undefined;
       if (typeof status === 'number') span.setAttribute('http.response.status_code', status);
     } catch (e) {
       failed = true;

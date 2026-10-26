@@ -4,6 +4,7 @@ export { withRedberry, type WithRedberryOptions } from './wrap';
 export { vercelBlob, type VercelBlobOptions } from './stores/vercel-blob';
 export { gcs, type GcsOptions } from './stores/gcs';
 export { azureBlob, type AzureBlobOptions, type AzureCredential } from './stores/azure-blob';
+export { s3, type S3Options, type S3Credential } from './stores/s3';
 export { redberry, type RedberryStoreOptions } from './stores/redberry';
 export { StoreConflictError, type PutMeta, type PutResult, type Store, type StoreKind } from './stores/types';
 export { canonicalJson, deterministicGzip } from './canonical';

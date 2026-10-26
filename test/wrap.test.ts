@@ -10,7 +10,7 @@ import { registerRedberry } from '../src/node';
 import { RedberryProcessor, type TraceResult } from '../src/processor';
 import { withRedberry } from '../src/wrap';
 import type { PutMeta, Store } from '../src/stores/types';
-import { AGENT, AGENT_B, azureEnv, fakeFetch, json, withEnv } from './helpers';
+import { AGENT, AGENT_B, azureEnv, fakeFetch, json, lambdaEnv, withEnv } from './helpers';
 
 const silent = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -191,5 +191,76 @@ describe('registerRedberry', () => {
       'service.name': 'refund-agent', 'cloud.provider': 'azure', 'cloud.platform': 'azure.functions', 'telemetry.sdk.language': 'nodejs',
     });
     expect(doc.spans).toHaveLength(3);
+  });
+});
+
+describe('withRedberry on AWS Lambda', () => {
+  const lambdaContext = {
+    awsRequestId: '8f5c1f0e-1a2b-4c3d-9e8f-001122334455',
+    functionName: 'refund-agent',
+    invokedFunctionArn: 'arn:aws:lambda:eu-west-1:123456789012:function:refund-agent',
+    getRemainingTimeInMillis: () => 30_000,
+  };
+  const apiGatewayV1 = { httpMethod: 'POST', path: '/refund', queryStringParameters: { key: 'secret-key' }, requestContext: { stage: 'prod' }, body: '{}' };
+  const httpApiV2 = {
+    version: '2.0', rawPath: '/refund', rawQueryString: 'key=secret-key',
+    requestContext: { http: { method: 'POST', path: '/refund' }, domainName: 'abc.execute-api.eu-west-1.amazonaws.com' },
+  };
+  const functionUrl = {
+    version: '2.0', rawPath: '/api/refund', rawQueryString: 'key=secret-key',
+    requestContext: { http: { method: 'GET', path: '/api/refund' }, domainName: 'abcdefg.lambda-url.eu-west-1.on.aws' },
+  };
+
+  beforeEach(() => {
+    restoreEnv();
+    restoreEnv = withEnv(lambdaEnv());
+  });
+
+  it.each([
+    ['API Gateway REST (payload 1.0)', apiGatewayV1, 'POST', '/refund'],
+    ['API Gateway HTTP API (payload 2.0)', httpApiV2, 'POST', '/refund'],
+    ['a function URL', functionUrl, 'GET', '/api/refund'],
+  ])('stores and reports %s before returning, as an http invocation', async (_what, event, method, urlPath) => {
+    const { results, puts } = install();
+    const response = { statusCode: 200, body: '{"ok":true}' };
+    const handler = withRedberry(async (_event: unknown, context: typeof lambdaContext) => {
+      expect(context.functionName).toBe('refund-agent');
+      await generateText();
+      return response;
+    }, { agentId: AGENT_B });
+    expect(await handler(event, lambdaContext)).toBe(response);
+    expect(puts).toHaveLength(1);
+    expect(results[0]).toMatchObject({ finish: 'complete', agentId: AGENT_B, stored: true, report: { outcome: 'recorded' } });
+    const doc = stored(puts[0]!.bytes);
+    const root = doc.spans.find((s: { name: string }) => s.name === 'refund-agent');
+    expect(root.kind).toBe(SpanKind.SERVER);
+    expect(root.attributes).toEqual({
+      'faas.name': 'refund-agent', 'faas.invocation_id': lambdaContext.awsRequestId, 'faas.trigger': 'http',
+      'cloud.provider': 'aws', 'cloud.platform': 'aws_lambda', 'cloud.region': 'eu-west-1', 'cloud.account.id': '123456789012',
+      'http.request.method': method, 'url.path': urlPath, 'http.response.status_code': 200, 'redberry.agent_id': AGENT_B,
+    });
+    expect(JSON.stringify(doc)).not.toContain('secret-key'); // the query string is not recorded
+  });
+
+  it('records any other event (SQS, a direct invoke) as faas.trigger other', async () => {
+    const { puts } = install();
+    await withRedberry(async (_event: unknown, _context: unknown) => generateText(), { agentId: AGENT_B })({ Records: [{ eventSource: 'aws:sqs' }] }, lambdaContext);
+    const root = stored(puts[0]!.bytes).spans.find((s: { name: string }) => s.name === 'refund-agent');
+    expect(root.kind).toBe(SpanKind.INTERNAL);
+    expect(root.attributes).toMatchObject({ 'faas.trigger': 'other', 'cloud.platform': 'aws_lambda' });
+    expect(root.attributes['http.request.method']).toBeUndefined();
+  });
+
+  it('registerRedberry sets the Lambda resource', async () => {
+    const puts: Uint8Array[] = [];
+    const store: Store = { kind: 's3', put: async (_p, bytes) => (puts.push(bytes), {}) };
+    delete (globalThis as Record<symbol, unknown>)[Symbol.for('@redberrylabs/otel.registered')]; // registered by an earlier test
+    const p = registerRedberry({ store, fetch: fakeFetch(() => json(201, {})), logger: silent });
+    expect(p.stats().enabled).toBe(true);
+    await withRedberry(async (_event: unknown, _context: unknown) => generateText(), { agentId: AGENT_B })(functionUrl, lambdaContext);
+    expect(stored(puts[0]!).resource).toMatchObject({
+      'service.name': 'refund-agent', 'cloud.provider': 'aws', 'cloud.platform': 'aws_lambda', 'cloud.region': 'eu-west-1',
+      'faas.name': 'refund-agent', 'faas.version': '$LATEST',
+    });
   });
 });
