@@ -16,6 +16,7 @@ import {
 } from './credentials';
 import { encodeOtlpJson } from './otlp';
 import { discoverAwsIngest } from './discover-aws';
+import { discoverAzureIngest } from './discover-azure';
 
 export type Cloud = 'gcp' | 'aws' | 'azure';
 
@@ -50,9 +51,13 @@ export interface AwsExporterOptions extends Base {
 
 export interface AzureExporterOptions extends Base {
   cloud: 'azure';
-  tenantId: string;
-  clientId: string;
+  /** Vercel: the identity federated with the Vercel issuer. On Azure the managed identity is used instead. */
+  tenantId?: string;
+  clientId?: string;
   scope: string;
+  /** Redberry's API, asked for the ingest URL when ``endpoint`` is left out (default: dev). */
+  apiUrl?: string;
+  env?: Record<string, string | undefined>;
 }
 
 export type RedberryExporterOptions = GcpExporterOptions | AwsExporterOptions | AzureExporterOptions;
@@ -78,7 +83,7 @@ function credentialFor(o: RedberryExporterOptions): IngestCredential {
     case 'aws':
       return awsCredential({ ...common, region: o.region, roleArn: o.roleArn, env: o.env });
     case 'azure':
-      return azureCredential({ ...common, tenantId: o.tenantId, clientId: o.clientId, scope: o.scope });
+      return azureCredential({ ...common, tenantId: o.tenantId, clientId: o.clientId, scope: o.scope, env: o.env });
     default:
       throw new Error(`redberryExporter(): cloud must be gcp, aws or azure, not ${String((o as { cloud?: unknown }).cloud)}`);
   }
@@ -86,13 +91,24 @@ function credentialFor(o: RedberryExporterOptions): IngestCredential {
 
 /** An OTLP/HTTP span exporter to a Redberry ingest service. Throws only on invalid options. */
 export function redberryExporter(options: RedberryExporterOptions): RedberryExporter {
-  if (!options?.endpoint && options?.cloud !== 'aws') throw new Error('redberryExporter(): endpoint is required');
+  if (!options?.endpoint && options?.cloud !== 'aws' && options?.cloud !== 'azure') {
+    throw new Error('redberryExporter(): endpoint is required');
+  }
   const credential = credentialFor(options);
   // The traces URL: fixed, or (AWS, no endpoint) discovered once and cached; a failed discovery is
   // retried on the next export.
   let discovered: Promise<string> | undefined;
   const urlOf = (): Promise<string> => {
     if (options.endpoint) return Promise.resolve(`${trimBase(options.endpoint)}/v1/traces`);
+    if (options.cloud === 'azure' && credential.azureToken) {
+      discovered ??= discoverAzureIngest({ token: credential.azureToken, apiUrl: options.apiUrl, fetch: options.fetch })
+        .then((u) => `${u}/v1/traces`)
+        .catch((e: unknown) => {
+          discovered = undefined;
+          throw e;
+        });
+      return discovered;
+    }
     const creds = credential.awsCredentials;
     if (!creds || options.cloud !== 'aws') return Promise.reject(new Error('no endpoint'));
     discovered ??= discoverAwsIngest({ region: options.region, credentials: creds, fetch: options.fetch, now: options.now })

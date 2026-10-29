@@ -24,6 +24,8 @@ export interface IngestCredential {
   invalidate(): void;
   /** AWS only: the credentials the requests are signed with (ingest discovery signs with them too). */
   awsCredentials?: () => Promise<AwsCredentials>;
+  /** Azure only: the bearer token (ingest discovery asks Redberry with it). */
+  azureToken?: () => Promise<string>;
 }
 
 interface Common {
@@ -54,11 +56,14 @@ export interface AwsCredentialOptions extends Common {
 }
 
 export interface AzureCredentialOptions extends Common {
-  tenantId: string;
-  /** The app registration or user-assigned managed identity with a federated credential for the Vercel issuer. */
-  clientId: string;
+  /** Vercel only: the tenant of the identity with a federated credential for the Vercel issuer. */
+  tenantId?: string;
+  /** Vercel: that identity's client id. On Azure: a user-assigned managed identity's client id (optional). */
+  clientId?: string;
   /** The ingest app's scope, ``<application id URI>/.default``. */
   scope: string;
+  /** Default: the process environment (``IDENTITY_ENDPOINT`` and ``IDENTITY_HEADER`` select the managed identity). */
+  env?: Record<string, string | undefined>;
 }
 
 /** A cache of one token, refreshed ``REFRESH_MARGIN_MS`` before it expires, with one refresh in flight. */
@@ -180,22 +185,50 @@ export function awsCredential(o: AwsCredentialOptions): IngestCredential {
   };
 }
 
+/** True on Azure Functions, App Service and Container Apps, where the managed identity endpoint is set. */
+export function onAzureManagedIdentity(env: Record<string, string | undefined>): boolean {
+  return !!(env.IDENTITY_ENDPOINT && env.IDENTITY_HEADER);
+}
+
 export function azureCredential(o: AzureCredentialOptions): IngestCredential {
-  for (const k of ['tenantId', 'clientId', 'scope'] as const) {
-    if (!o[k]) throw new Error(`redberryExporter(azure): ${k} is required`);
-  }
+  if (!o.scope) throw new Error('redberryExporter(azure): scope is required');
+  const env = o.env ?? process.env;
   const f = fetchOf(o);
   const now = o.now ?? Date.now;
+  if (onAzureManagedIdentity(env)) {
+    // On Azure: the function's (or container app's) managed identity, from its local token endpoint.
+    const resource = o.scope.replace(/\/\.default$/, '');
+    const mi = cachedToken(now, async () => {
+      const q = new URLSearchParams({ 'api-version': '2019-08-01', resource });
+      if (o.clientId) q.set('client_id', o.clientId);
+      const r = await f(`${env.IDENTITY_ENDPOINT}?${q.toString()}`, { headers: { 'x-identity-header': env.IDENTITY_HEADER ?? '' } });
+      if (!r.ok) throw new Error(`azure: managed identity token request failed: ${await describe(r)}`);
+      const reply = (await readJson(r)) as { access_token?: string; expires_on?: number | string } | undefined;
+      if (!reply?.access_token) throw new Error('azure: the managed identity reply has no access_token');
+      const on = Number(reply.expires_on);
+      return { value: reply.access_token, expiresAt: Number.isFinite(on) && on > 0 ? on * 1000 : now() + DEFAULT_LIFETIME_MS };
+    });
+    return {
+      async headers() {
+        return { authorization: `Bearer ${await mi.get()}` };
+      },
+      invalidate: mi.clear,
+      azureToken: () => mi.get(),
+    };
+  }
+  for (const k of ['tenantId', 'clientId'] as const) {
+    if (!o[k]) throw new Error(`redberryExporter(azure): ${k} is required off Azure (Vercel OIDC federation)`);
+  }
   const token = cachedToken(now, async () => {
     const assertion = await (o.getOidcToken ?? vercelOidcToken)();
     const form = new URLSearchParams({
       grant_type: 'client_credentials',
-      client_id: o.clientId,
+      client_id: o.clientId!,
       scope: o.scope,
       client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
       client_assertion: assertion,
     });
-    const r = await f(`${LOGIN_URL}${encodeURIComponent(o.tenantId)}/oauth2/v2.0/token`, {
+    const r = await f(`${LOGIN_URL}${encodeURIComponent(o.tenantId!)}/oauth2/v2.0/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
@@ -211,5 +244,6 @@ export function azureCredential(o: AzureCredentialOptions): IngestCredential {
       return { authorization: `Bearer ${await token.get()}` };
     },
     invalidate: token.clear,
+    azureToken: () => token.get(),
   };
 }
