@@ -27,6 +27,7 @@ interface UploadUrl {
   object?: string;
 }
 
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export function redberry(options: RedberryStoreOptions = {}): Store {
   const f: Fetch = options.fetch ?? ((...a) => fetch(...a));
   const delays = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;

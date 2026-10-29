@@ -40,6 +40,38 @@ export async function vercelOidcToken(): Promise<string> {
   return m.getVercelOidcToken();
 }
 
+/** The workload identity pool provider, as Google STS names it in ``audience``. */
+export function poolProviderAudience(projectNumber: string | number, poolId: string, providerId: string): string {
+  return `//iam.googleapis.com/projects/${projectNumber}/locations/global/workloadIdentityPools/${poolId}/providers/${providerId}`;
+}
+
+/** Google STS token exchange (RFC 8693): an external OIDC token for a federated access token. */
+export async function googleStsExchange(
+  f: Fetch,
+  audience: string,
+  subjectToken: string,
+  delays: readonly number[] = DEFAULT_RETRY_DELAYS_MS,
+  label = 'gcp',
+): Promise<string> {
+  const form = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    audience,
+    scope: SCOPE_CLOUD,
+    requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+    subject_token: subjectToken,
+    subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+  });
+  const sts = await withRetries(
+    () => f(STS_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() }),
+    delays,
+  );
+  if (!sts.response?.ok) throw new Error(`${label}: STS token exchange failed: ${sts.response ? await describe(sts.response) : String(sts.error)}`);
+  const federated = (await readJson(sts.response)) as { access_token?: string } | undefined;
+  if (!federated?.access_token) throw new Error(`${label}: STS reply has no access_token`);
+  return federated.access_token;
+}
+
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export function gcs(options: GcsOptions): Store {
   for (const k of ['bucket', 'projectNumber', 'poolId', 'providerId', 'serviceAccount'] as const) {
     if (!options[k]) throw new Error(`gcs(): ${k} is required`);
@@ -47,30 +79,13 @@ export function gcs(options: GcsOptions): Store {
   const f: Fetch = options.fetch ?? ((...a) => fetch(...a));
   const now = options.now ?? Date.now;
   const delays = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
-  const audience =
-    `//iam.googleapis.com/projects/${options.projectNumber}/locations/global/` +
-    `workloadIdentityPools/${options.poolId}/providers/${options.providerId}`;
+  const audience = poolProviderAudience(options.projectNumber, options.poolId, options.providerId);
   let cached: { token: string; expiresAt: number } | undefined;
   let pending: Promise<string> | undefined;
 
   async function mint(): Promise<string> {
     const subject = await (options.getOidcToken ?? vercelOidcToken)();
-    const form = new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
-      audience,
-      scope: SCOPE_CLOUD,
-      requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-      subject_token: subject,
-      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
-    });
-    const sts = await withRetries(
-      () => f(STS_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() }),
-      delays,
-    );
-    if (!sts.response?.ok) throw new Error(`gcs: STS token exchange failed: ${sts.response ? await describe(sts.response) : String(sts.error)}`);
-    const federated = (await readJson(sts.response)) as { access_token?: string } | undefined;
-    if (!federated?.access_token) throw new Error('gcs: STS reply has no access_token');
-
+    const federated = { access_token: await googleStsExchange(f, audience, subject, delays, 'gcs') };
     const iam = await withRetries(
       () =>
         f(`${IAM_URL}${encodeURIComponent(options.serviceAccount)}:generateAccessToken`, {

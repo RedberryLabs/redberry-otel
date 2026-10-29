@@ -156,6 +156,7 @@ async function flush(traceId: string, ms: number): Promise<void> {
  * ``async (event, context) => …`` (or any function) so that each invocation is one trace, hashed, stored and reported before the wrapper returns. The handler's result is returned
  * unchanged, and an error it throws is rethrown, after the flush. Without a registered tracer provider
  * (``registerRedberry()``) or with the processor disabled, the handler simply runs.
+ * @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init().
  */
 export function withRedberry<A extends unknown[], R>(handler: (...args: A) => R, options: WithRedberryOptions = {}): (...args: A) => Promise<Awaited<R>> {
   const agentId = options.agentId;

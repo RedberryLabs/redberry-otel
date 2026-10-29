@@ -99,6 +99,7 @@ function remember(set: Set<string>, id: string): void {
   if (set.size > REMEMBERED) set.delete(set.values().next().value as string);
 }
 
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export class RedberryProcessor implements SpanProcessor {
   private readonly cfg: ResolvedConfig;
   private readonly traces = new Map<string, TraceState>();

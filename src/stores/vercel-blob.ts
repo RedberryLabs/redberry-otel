@@ -14,6 +14,7 @@ export interface VercelBlobOptions {
   put?: PutFn;
 }
 
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export function vercelBlob(options: VercelBlobOptions = {}): Store {
   let putFn: Promise<PutFn> | undefined;
   const load = (): Promise<PutFn> =>
