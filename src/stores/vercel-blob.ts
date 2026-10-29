@@ -3,6 +3,7 @@
 // refused ("This blob already exists"). That is no-overwrite, not immutability: anyone holding the
 // store's read-write token can delete and re-put. The tamper evidence is the signed hash VALP keeps.
 import type { put as blobPut } from '@vercel/blob';
+import type * as VercelBlob from '@vercel/blob';
 import { StoreConflictError, type Store } from './types';
 
 type PutFn = typeof blobPut;
@@ -15,12 +16,16 @@ export interface VercelBlobOptions {
 }
 
 /** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
+// Loaded only when this store is used. The specifier is a variable, and bundlers are told to leave the import
+// alone, so an application that never uses this store builds without the optional @vercel/blob package.
+const BLOB_MODULE = '@vercel/blob';
+
 export function vercelBlob(options: VercelBlobOptions = {}): Store {
   let putFn: Promise<PutFn> | undefined;
   const load = (): Promise<PutFn> =>
     (putFn ??= options.put
       ? Promise.resolve(options.put)
-      : import('@vercel/blob').then((m) => m.put, (e: unknown) => {
+      : (import(/* webpackIgnore: true */ /* turbopackIgnore: true */ BLOB_MODULE) as Promise<typeof VercelBlob>).then((m) => m.put, (e: unknown) => {
           putFn = undefined;
           throw new Error(`vercelBlob() needs the @vercel/blob package installed: ${String(e)}`);
         }));
