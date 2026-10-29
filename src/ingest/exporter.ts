@@ -15,12 +15,14 @@ import {
   type IngestCredential,
 } from './credentials';
 import { encodeOtlpJson } from './otlp';
+import { discoverAwsIngest } from './discover-aws';
 
 export type Cloud = 'gcp' | 'aws' | 'azure';
 
 interface Base {
-  /** The ingest service's base URL; spans go to ``<endpoint>/v1/traces``. */
-  endpoint: string;
+  /** The ingest service's base URL; spans go to ``<endpoint>/v1/traces``. On AWS it may be left out: the
+   * exporter reads it from the installation's ``s3://redberry-<account>-<region>/ingest.json``. */
+  endpoint?: string;
   /** The whole export's time bound, retries included (default 10000). */
   timeoutMillis?: number;
   fetch?: Fetch;
@@ -72,7 +74,7 @@ function credentialFor(o: RedberryExporterOptions): IngestCredential {
   const common = { fetch: o.fetch, getOidcToken: o.getOidcToken, now: o.now };
   switch (o.cloud) {
     case 'gcp':
-      return gcpCredential({ ...common, audience: trimBase(o.endpoint), projectNumber: o.projectNumber, poolId: o.poolId, providerId: o.providerId, serviceAccount: o.serviceAccount });
+      return gcpCredential({ ...common, audience: trimBase(o.endpoint ?? ""), projectNumber: o.projectNumber, poolId: o.poolId, providerId: o.providerId, serviceAccount: o.serviceAccount });
     case 'aws':
       return awsCredential({ ...common, region: o.region, roleArn: o.roleArn, env: o.env });
     case 'azure':
@@ -84,9 +86,23 @@ function credentialFor(o: RedberryExporterOptions): IngestCredential {
 
 /** An OTLP/HTTP span exporter to a Redberry ingest service. Throws only on invalid options. */
 export function redberryExporter(options: RedberryExporterOptions): RedberryExporter {
-  if (!options?.endpoint) throw new Error('redberryExporter(): endpoint is required');
-  const url = `${trimBase(options.endpoint)}/v1/traces`;
+  if (!options?.endpoint && options?.cloud !== 'aws') throw new Error('redberryExporter(): endpoint is required');
   const credential = credentialFor(options);
+  // The traces URL: fixed, or (AWS, no endpoint) discovered once and cached; a failed discovery is
+  // retried on the next export.
+  let discovered: Promise<string> | undefined;
+  const urlOf = (): Promise<string> => {
+    if (options.endpoint) return Promise.resolve(`${trimBase(options.endpoint)}/v1/traces`);
+    const creds = credential.awsCredentials;
+    if (!creds || options.cloud !== 'aws') return Promise.reject(new Error('no endpoint'));
+    discovered ??= discoverAwsIngest({ region: options.region, credentials: creds, fetch: options.fetch, now: options.now })
+      .then((d) => `${d.url}/v1/traces`)
+      .catch((e: unknown) => {
+        discovered = undefined;
+        throw e;
+      });
+    return discovered;
+  };
   const f: Fetch = options.fetch ?? ((...a) => fetch(...a));
   const timeout = options.timeoutMillis ?? DEFAULT_TIMEOUT_MS;
   const delays = options.retryDelaysMs ?? DEFAULT_EXPORT_RETRY_DELAYS_MS;
@@ -112,6 +128,12 @@ export function redberryExporter(options: RedberryExporterOptions): RedberryExpo
       return fail('encode', String(e), spans.length);
     }
     const deadline = Date.now() + timeout;
+    let url: string;
+    try {
+      url = await urlOf();
+    } catch (e) {
+      return fail('discovery', e instanceof Error ? e.message : String(e), spans.length);
+    }
     let last = { kind: 'unknown', detail: '' };
     for (let attempt = 0; ; attempt++) {
       const left = deadline - Date.now();

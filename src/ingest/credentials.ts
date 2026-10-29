@@ -22,6 +22,8 @@ export interface IngestCredential {
   headers(url: string, body: string, contentType: string): Promise<Record<string, string>>;
   /** Forget the cached token, after the ingest service refused it (401/403). */
   invalidate(): void;
+  /** AWS only: the credentials the requests are signed with (ingest discovery signs with them too). */
+  awsCredentials?: () => Promise<AwsCredentials>;
 }
 
 interface Common {
@@ -174,6 +176,7 @@ export function awsCredential(o: AwsCredentialOptions): IngestCredential {
       return headers;
     },
     invalidate: assumed.clear,
+    awsCredentials: credentials,
   };
 }
 

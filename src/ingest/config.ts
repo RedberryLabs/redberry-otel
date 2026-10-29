@@ -43,9 +43,11 @@ export interface IngestConfig {
 /** The exporter options from ``options`` and the REDBERRY_* environment variables (options win). */
 export function exporterOptionsFrom(o: IngestConfig, env: Env = process.env): RedberryExporterOptions {
   const endpoint = o.endpoint ?? env.REDBERRY_INGEST_URL ?? '';
-  if (!endpoint) throw new Error('Redberry: the ingest URL is required (endpoint or REDBERRY_INGEST_URL)');
-  const cloud = o.cloud ?? (env.REDBERRY_CLOUD as Cloud | undefined);
-  const base = { endpoint, timeoutMillis: o.timeoutMillis, fetch: o.fetch, getOidcToken: o.getOidcToken };
+  const onLambda = !!(env.AWS_LAMBDA_FUNCTION_NAME || env.ECS_CONTAINER_METADATA_URI_V4);
+  const cloud = o.cloud ?? (env.REDBERRY_CLOUD as Cloud | undefined) ?? (onLambda ? 'aws' : undefined);
+  // On AWS the ingest URL can be discovered (discover-aws.ts); elsewhere it is required.
+  if (!endpoint && cloud !== 'aws') throw new Error('Redberry: the ingest URL is required (endpoint or REDBERRY_INGEST_URL)');
+  const base = { endpoint: endpoint || undefined, timeoutMillis: o.timeoutMillis, fetch: o.fetch, getOidcToken: o.getOidcToken };
   switch (cloud) {
     case 'gcp':
       return {

@@ -295,3 +295,62 @@ describe('init', () => {
     });
   });
 });
+
+describe('redberryExporter: aws discovery', () => {
+  const ACCOUNT = '123456789012';
+  const IDENTITY = `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${ACCOUNT}</Account>
+    <Arn>arn:aws:sts::${ACCOUNT}:assumed-role/agent/fn</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>`;
+  const DISCOVERED = 'https://xyz789.lambda-url.eu-west-1.on.aws';
+  const env = { AWS_ACCESS_KEY_ID: 'AKIDLAMBDA', AWS_SECRET_ACCESS_KEY: 's', AWS_SESSION_TOKEN: 'tok' };
+  const OBJECT = `https://redberry-${ACCOUNT}-eu-west-1.s3.eu-west-1.amazonaws.com/ingest.json`;
+
+  function handler(objectStatus = 200, body: unknown = { url: `${DISCOVERED}/`, region: 'eu-west-1' }) {
+    return (url: string) => {
+      if (url.startsWith('https://sts.')) return new Response(IDENTITY);
+      if (url === OBJECT) return objectStatus === 200 ? ok(body) : new Response('AccessDenied', { status: objectStatus });
+      return new Response('');
+    };
+  }
+
+  it('reads ingest.json from the account bucket, owner-checked, and sends there (once discovered, cached)', async () => {
+    const { f, calls } = mockFetch(handler());
+    const e = redberryExporter({ cloud: 'aws', region: 'eu-west-1', env, fetch: f });
+    expect((await exportOnce(e, spans())).code).toBe(ExportResultCode.SUCCESS);
+    expect(calls[0]!.url).toBe('https://sts.eu-west-1.amazonaws.com/');
+    expect(String(calls[0]!.init.body)).toBe('Action=GetCallerIdentity&Version=2011-06-15');
+    expect(headersOf(calls[0]!).authorization).toMatch(/\/eu-west-1\/sts\/aws4_request/);
+    expect(calls[1]!.url).toBe(OBJECT);
+    expect(headersOf(calls[1]!)['x-amz-expected-bucket-owner']).toBe(ACCOUNT);
+    expect(headersOf(calls[1]!).authorization).toMatch(/\/eu-west-1\/s3\/aws4_request, SignedHeaders=[^,]*x-amz-expected-bucket-owner/);
+    expect(calls[2]!.url).toBe(`${DISCOVERED}/v1/traces`);
+    expect(headersOf(calls[2]!).authorization).toMatch(/\/eu-west-1\/lambda\/aws4_request/);
+    await exportOnce(e, spans());
+    expect(calls.filter((c) => c.url === OBJECT)).toHaveLength(1);
+  });
+
+  it('a bucket it cannot read (another owner, not installed) fails the export, never throws, and is retried later', async () => {
+    let status = 403;
+    const { f, calls } = mockFetch((url) => handler(status)(url));
+    const e = redberryExporter({ cloud: 'aws', region: 'eu-west-1', env, fetch: f });
+    const r = await exportOnce(e, spans());
+    expect(r.code).toBe(ExportResultCode.FAILED);
+    expect(r.error?.message).toMatch(/discovery: .*redberry-123456789012-eu-west-1\/ingest\.json/);
+    expect(e.droppedSpans()).toBe(2);
+    status = 200;
+    expect((await exportOnce(e, spans())).code).toBe(ExportResultCode.SUCCESS);
+    expect(calls.filter((c) => c.url === OBJECT)).toHaveLength(2);
+  });
+
+  it('refuses an ingest.json without an https url', async () => {
+    const { f } = mockFetch(handler(200, { url: 'http://evil.example' }));
+    const e = redberryExporter({ cloud: 'aws', region: 'eu-west-1', env, fetch: f });
+    expect((await exportOnce(e, spans())).error?.message).toMatch(/no https url/);
+  });
+
+  it('on Lambda the options need no ingest URL (cloud inferred)', () => {
+    const o = exporterOptionsFrom({}, { ...env, AWS_LAMBDA_FUNCTION_NAME: 'refund', AWS_REGION: 'eu-west-1' });
+    expect(o).toMatchObject({ cloud: 'aws', region: 'eu-west-1' });
+    expect(o.endpoint).toBeUndefined();
+    expect(() => exporterOptionsFrom({}, { REDBERRY_CLOUD: 'gcp' })).toThrow(/ingest URL is required/);
+  });
+});

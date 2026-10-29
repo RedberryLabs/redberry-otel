@@ -41,6 +41,10 @@ init({ agent: 'refund-agent' }); // once, at start-up; later calls return the sa
 
 `init()` registers a tracer provider with a bounded batch span processor, an AsyncLocalStorage context manager and the resource attribute `redberry.agent.name`. The agent name must be 1 to 64 printable characters with no leading or trailing whitespace. If another tracer provider is already registered, pass `redberryExporter()` to it instead.
 
+### AWS Lambda
+
+On Lambda nothing needs configuring: `init({ agent })` finds the installation itself. It reads `ingest.json` from the installation's bucket `redberry-<account>-<region>` (the account from STS `GetCallerIdentity`, the read made with `x-amz-expected-bucket-owner`, so a bucket of that name owned by anyone else is refused) and signs each export with the function's own credentials. The function's role needs no policy: the installation grants it access on Redberry's resources. `REDBERRY_INGEST_URL` overrides the discovery.
+
 ### Environment variables
 
 | Variable | Option | Meaning |
