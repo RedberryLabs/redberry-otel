@@ -4,7 +4,8 @@ import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor, type Re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REFRESH_MARGIN_MS } from '../src/ingest/credentials';
 import { ExportResultCode, redberryExporter, type RedberryExporterOptions } from '../src/ingest/exporter';
-import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, init, validateAgentName } from '../src/init';
+import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, validateAgentName } from '../src/ingest/config';
+import { init } from '../src/init';
 import { IAM_URL, STS_URL } from '../src/stores/gcs';
 
 const INGEST = 'https://ingest-abc-ew.a.run.app';

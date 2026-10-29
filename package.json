@@ -31,6 +31,16 @@
         "default": "./dist/node.cjs"
       }
     },
+    "./init": {
+      "import": {
+        "types": "./dist/init.d.ts",
+        "default": "./dist/init.js"
+      },
+      "require": {
+        "types": "./dist/init.d.cts",
+        "default": "./dist/init.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -61,6 +71,12 @@
     "@vercel/blob": "^2.8.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/context-async-hooks": {
+      "optional": true
+    },
+    "@opentelemetry/resources": {
+      "optional": true
+    },
     "@vercel/blob": {
       "optional": true
     }

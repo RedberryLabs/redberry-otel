@@ -34,7 +34,7 @@ Or pass the options directly: `redberryExporter({ cloud: 'gcp', endpoint, projec
 ### Anywhere else (AWS Lambda, Azure Functions, Node.js)
 
 ```ts
-import { init } from '@redberrylabs/otel';
+import { init } from '@redberrylabs/otel/init';
 
 init({ agent: 'refund-agent' }); // once, at start-up; later calls return the same set-up
 ```

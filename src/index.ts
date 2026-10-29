@@ -26,4 +26,4 @@ export {
 } from './ingest/exporter';
 export { gcpCredential, awsCredential, azureCredential, type IngestCredential } from './ingest/credentials';
 export { encodeOtlpJson } from './ingest/otlp';
-export { init, validateAgentName, exporterOptionsFrom, AGENT_NAME_ATTRIBUTE, type InitOptions, type RedberryTracing } from './init';
+export { validateAgentName, exporterOptionsFrom, AGENT_NAME_ATTRIBUTE, type IngestConfig } from './ingest/config';
