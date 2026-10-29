@@ -1,5 +1,82 @@
 # @redberrylabs/otel
 
+Send your AI agents' OpenTelemetry traces to your Redberry installation. The agent only emits spans: `redberryExporter()` posts them as OTLP over HTTP to the Redberry ingest service that runs in your own cloud (Google Cloud Run today; AWS Lambda and Azure next), which stores, hashes and scores them there. No signing key, bucket or hashing runs inside your functions.
+
+## Send traces to your Redberry installation
+
+```sh
+npm install @redberrylabs/otel @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/context-async-hooks @opentelemetry/resources
+```
+
+On Vercel, `@vercel/functions` (a dependency of this package) provides the OIDC token the exporter exchanges for a short-lived credential. There is no long-lived secret in the project.
+
+### Vercel (Next.js, `@vercel/otel`, AI SDK telemetry)
+
+```ts
+// instrumentation.ts
+import { registerOTel } from '@vercel/otel';
+
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+  const { redberryExporter, exporterOptionsFrom, validateAgentName } = await import('@redberrylabs/otel');
+  registerOTel({
+    serviceName: 'refund-agent',
+    // The resource attribute the ingest service files the spans under.
+    attributes: { 'redberry.agent.name': validateAgentName('refund-agent') },
+    // Endpoint and credentials from the REDBERRY_* variables below.
+    traceExporter: redberryExporter(exporterOptionsFrom({})),
+  });
+}
+```
+
+Or pass the options directly: `redberryExporter({ cloud: 'gcp', endpoint, projectNumber, poolId, providerId, serviceAccount })`. AI SDK spans need the SDK's telemetry enabled (`experimental_telemetry: { isEnabled: true }`, or `registerTelemetry` with `@ai-sdk/otel` on AI SDK 7).
+
+### Anywhere else (AWS Lambda, Azure Functions, Node.js)
+
+```ts
+import { init } from '@redberrylabs/otel/init';
+
+init({ agent: 'refund-agent' }); // once, at start-up; later calls return the same set-up
+```
+
+`init()` registers a tracer provider with a bounded batch span processor, an AsyncLocalStorage context manager and the resource attribute `redberry.agent.name`. The agent name must be 1 to 64 printable characters with no leading or trailing whitespace. If another tracer provider is already registered, pass `redberryExporter()` to it instead.
+
+### AWS Lambda
+
+On Lambda nothing needs configuring: `init({ agent })` finds the installation itself. It reads `ingest.json` from the installation's bucket `redberry-<account>-<region>` (the account from STS `GetCallerIdentity`, the read made with `x-amz-expected-bucket-owner`, so a bucket of that name owned by anyone else is refused) and signs each export with the function's own credentials. The function's role needs no policy: the installation grants it access on Redberry's resources. `REDBERRY_INGEST_URL` overrides the discovery.
+
+### Environment variables
+
+| Variable | Option | Meaning |
+|---|---|---|
+| `REDBERRY_INGEST_URL` | `endpoint` | The ingest service's base URL; spans go to `<url>/v1/traces` |
+| `REDBERRY_CLOUD` | `cloud` | `gcp`, `aws` or `azure` |
+| `REDBERRY_GCP_PROJECT_NUMBER` | `projectNumber` | GCP: project number of the workload identity pool |
+| `REDBERRY_GCP_POOL_ID` | `poolId` | GCP: workload identity pool |
+| `REDBERRY_GCP_PROVIDER_ID` | `providerId` | GCP: the pool's Vercel OIDC provider |
+| `REDBERRY_GCP_SERVICE_ACCOUNT` | `serviceAccount` | GCP: service account allowed to invoke the ingest service |
+| `REDBERRY_AWS_REGION` | `region` | AWS: the function URL's region (default `AWS_REGION`) |
+| `REDBERRY_AWS_ROLE_ARN` | `roleArn` | AWS: role assumed with the Vercel OIDC token; omit on Lambda to use the execution role |
+| `REDBERRY_AZURE_TENANT_ID` | `tenantId` | Azure: Entra ID tenant |
+| `REDBERRY_AZURE_CLIENT_ID` | `clientId` | Azure: app or managed identity with a federated credential for the Vercel issuer |
+| `REDBERRY_AZURE_SCOPE` | `scope` | Azure: `<ingest application ID URI>/.default` |
+
+How each cloud authenticates:
+
+- **GCP**: Vercel OIDC token, exchanged at Google STS (workload identity federation), then IAM Credentials `generateIdToken` for the service account with the ingest URL as audience. Sent as `Authorization: Bearer <ID token>`.
+- **AWS**: credentials from `AssumeRoleWithWebIdentity` with the Vercel OIDC token, or the Lambda environment's own credentials. The POST is SigV4-signed for service `lambda` (a function URL with `AWS_IAM` auth).
+- **Azure**: the Vercel OIDC token as a client assertion to Entra ID (client credentials grant). Sent as a Bearer token.
+
+Tokens are cached until five minutes before they expire, with one refresh at a time.
+
+### Failure behaviour
+
+The exporter never throws into your application. An export that cannot be delivered resolves `FAILED`; 429, 5xx, 401 and 403 (IAM changes can take minutes to propagate) are retried with backoff within `timeoutMillis` (default 10 s). Each kind of failure is logged once through the OpenTelemetry `diag` logger, and `exporter.droppedSpans()` counts the spans that were not delivered.
+
+## Deprecated: in-process hashing
+
+`RedberryProcessor`, `withRedberry`, `registerRedberry` and the stores (`vercelBlob`, `gcs`, `azureBlob`, `s3`, `redberry`) still work but are deprecated: they hash, store and sign each run inside your function. New installations send traces to the ingest service instead (above). The rest of this section documents the deprecated API.
+
 An OpenTelemetry span processor for AI agents on Vercel, Azure Functions and AWS Lambda (Node.js). For each agent run (one request or invocation, one trace), it:
 
 1. collects the spans and works out when the run has finished
@@ -9,7 +86,7 @@ An OpenTelemetry span processor for AI agents on Vercel, Azure Functions and AWS
 
 VALP keeps each report as a create-once leaf and seals the leaves into chained five-minute windows. A stored trace can later be checked against that leaf. The bytes and the report are pinned in [SPEC.md](SPEC.md).
 
-## Install
+### Install
 
 On Vercel:
 
@@ -25,7 +102,7 @@ npm install @redberrylabs/otel @ai-sdk/otel @opentelemetry/api @opentelemetry/sd
 
 `redberry connect --platform vercel` (or `--platform azure-functions`) adds these dependencies, writes the instrumentation and sets the environment variables for you. Releases are published from GitHub Actions with npm provenance.
 
-## Requirements
+### Requirements
 
 - Node.js 22 or later. AI SDK 7 requires it, and Vercel functions run Node 24.
 - The **Node.js runtime only**. On Edge, the processor turns itself off: Edge is deprecated in Next 16, and AI Gateway OIDC failed there in the spike.
@@ -35,7 +112,7 @@ npm install @redberrylabs/otel @ai-sdk/otel @opentelemetry/api @opentelemetry/sd
 - For the `azure-blob` store, the container and managed identity that `redberry setup-azure` creates.
 - For the `s3` store, the Object Lock bucket and the IAM role or policy that `redberry setup-aws` creates.
 
-## Set-up (Next.js, AI SDK 7)
+### Set-up (Next.js, AI SDK 7)
 
 `redberry connect --platform vercel` writes this file and sets the environment variables. The snippet below is the CLI's template (`redberry_cli/vercel.py` `INSTRUMENTATION`), so keep the two the same shape:
 
@@ -69,7 +146,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 ```
 
-## Set-up (Azure Functions, Node.js, AI SDK 7)
+### Set-up (Azure Functions, Node.js, AI SDK 7)
 
 Azure Functions has no `waitUntil`, so each handler is wrapped: `withRedberry` opens a root span for the invocation, runs the handler inside it, and once the handler has settled, stores and reports the run before it returns the handler's response. A slow store never holds the function past `flushTimeoutMs` (default 10 s). Register tracing once, in a module every function file imports first:
 
@@ -107,7 +184,7 @@ app.http('refund', { methods: ['POST'], handler: withRedberry(refund, { agentId:
 - `registerRedberry()` registers a global tracer provider. If the app already has one (the Azure Monitor OpenTelemetry distro, for example), add `new RedberryProcessor()` to that provider's span processors instead, and keep `withRedberry` on the handlers.
 - `@ai-sdk/otel` is an ES module. Use an ESM function app (`"type": "module"`), or Node 22.12 or later, which can `require` it.
 
-## Set-up (AWS Lambda, Node.js, AI SDK 7)
+### Set-up (AWS Lambda, Node.js, AI SDK 7)
 
 Lambda freezes the function as soon as the handler returns, so, as on Azure Functions, each handler is wrapped: `withRedberry` stores and reports the run before it hands back the handler's result. Only async handlers `async (event, context) => …` are supported.
 
@@ -138,7 +215,7 @@ Environment (Lambda function configuration): `REDBERRY_URL`, `REDBERRY_PROJECT_T
 
 You do not need `metadata: { agentId }` in AI SDK calls. AI SDK 7 drops `metadata`. The processor assigns each run to an agent from its own configuration (below). It records the agent in the stored trace and the report, and stamps it on every stored span as `redberry.agent_id`.
 
-## Configuration
+### Configuration
 
 Every option can be set in the environment. An option passed to `new RedberryProcessor({...})` wins over the environment variable. If the configuration is incomplete, the processor logs one warning and does nothing. It never throws into your app.
 
@@ -167,7 +244,7 @@ Agent ids are `AGT-` followed by a ULID. Anything else turns the processor off w
 
 `processor.stats()` returns counters: traces seen, `complete` and `cutShort`, skipped (no AI spans or no agent), dropped, late spans, stored or failed, and `recorded`, `duplicates`, `refused` and `reportFailed`, plus samples.
 
-## Stores
+### Stores
 
 ```ts
 import { RedberryProcessor, vercelBlob, gcs, azureBlob, s3, redberry } from '@redberrylabs/otel';
@@ -200,7 +277,7 @@ new RedberryProcessor({
 
 If the store fails, the hash is still reported, with `stored: false`.
 
-## Deadlines
+### Deadlines
 
 The `waitUntil` work counts against the function's `maxDuration`. In the spike, a run killed by the timeout lost its whole trace. When `deadlineMs` is set, a timer cuts a still-running trace short, finalises it as `finish: "cut_short", cut_reason: "deadline"`, and stores and reports it `deadlineMarginMs` before the earlier of these two times:
 
@@ -213,7 +290,7 @@ On Azure Functions and AWS Lambda the package reads no per-invocation deadline, 
 
 **Limitation:** a hard kill still loses the run. That covers no deadline set, a margin too small, an out-of-memory crash, or a frozen instance. Nothing in-process survives that. Leave headroom in `maxDuration`.
 
-## What is stored
+### What is stored
 
 The stored trace is a JSON document (`schema: "redberry.trace.v1"`) holding every span of the request, including the Next.js and fetch spans for timing context, with all attributes as emitted. For AI SDK 7 runs, that includes the full input messages, the system prompt, each tool call's name, arguments and result, the tool definitions, model ids, temperature and token usage. A typical run is about 5 KB gzipped. See [SPEC.md](SPEC.md) for the exact bytes.
 

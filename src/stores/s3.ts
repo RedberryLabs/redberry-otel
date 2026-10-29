@@ -104,6 +104,7 @@ export function parseAssumeRoleReply(xml: string): (AwsCredentials & { expiratio
   return { accessKeyId, secretAccessKey, sessionToken, expiration: Number.isFinite(exp) ? exp : undefined };
 }
 
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export function s3(options: S3Options): Store {
   if (!options.bucket) throw new Error('s3(): bucket (REDBERRY_S3_BUCKET) is required');
   if (!options.region) throw new Error('s3(): region (REDBERRY_S3_REGION) is required');

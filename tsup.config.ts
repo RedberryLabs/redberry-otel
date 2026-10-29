@@ -1,8 +1,9 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  // index: the processor and stores (Vercel and anywhere). node: registerRedberry, for Node.js outside Vercel.
-  entry: ['src/index.ts', 'src/node.ts'],
+  // index: the exporter, processor and stores (Vercel and anywhere). node: registerRedberry. init: init(), which
+  // loads the optional peers context-async-hooks and resources.
+  entry: ['src/index.ts', 'src/node.ts', 'src/init.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,

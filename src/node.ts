@@ -56,6 +56,7 @@ export function resourceAttributes(env: Env, serviceName?: string): Attributes {
  * When the processor is disabled (local development, say) and no other span processor is given, nothing is
  * registered. If another tracer provider is already registered globally (the Azure Monitor distro, for
  * example), it is left in place: add ``new RedberryProcessor()`` to that provider's span processors instead.
+ * @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init().
  */
 export function registerRedberry(options: RegisterRedberryOptions = {}): RedberryProcessor {
   const g = globalThis as { [KEY]?: RedberryProcessor };

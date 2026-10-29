@@ -92,6 +92,7 @@ interface TokenReply {
   expires_on?: number | string;
 }
 
+/** @deprecated In-process hashing is replaced by sending spans to the Redberry ingest service in your cloud: use redberryExporter() or init(). */
 export function azureBlob(options: AzureBlobOptions): Store {
   if (!options.containerUrl) throw new Error('azureBlob(): containerUrl is required');
   const container = containerUrlOf(options.containerUrl, options.allowHost);
