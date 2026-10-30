@@ -354,3 +354,65 @@ describe('redberryExporter: aws discovery', () => {
     expect(() => exporterOptionsFrom({}, { REDBERRY_CLOUD: 'gcp' })).toThrow(/ingest URL is required/);
   });
 });
+
+describe('redberryExporter: azure managed identity and discovery', () => {
+  const APP = 'api://c1b7f6d8-a898-4679-8343-9223a5f832d7';
+  const env = { IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token', IDENTITY_HEADER: 'hdr', WEBSITE_SITE_NAME: 'refund' };
+  const INGEST_URL = 'https://redberry-ingest.kindsea-1a2b3c.uksouth.azurecontainerapps.io';
+  const MI_TOKEN = 'mi.jwt.token';
+
+  function handler(discoveryStatus = 200) {
+    return (url: string) => {
+      if (url.startsWith(env.IDENTITY_ENDPOINT)) return ok({ access_token: MI_TOKEN, expires_on: String(Math.floor(Date.now() / 1000) + 3600) });
+      if (url === 'https://api-dev.redberry.sbs/api/discover/azure')
+        return discoveryStatus === 200 ? ok({ ingest_url: `${INGEST_URL}/` }) : new Response('unknown identity', { status: discoveryStatus });
+      return new Response('');
+    };
+  }
+
+  it('gets a managed-identity token for the Redberry app, asks Redberry for the ingest, and sends with Bearer', async () => {
+    const { f, calls } = mockFetch(handler());
+    const e = redberryExporter({ cloud: 'azure', scope: `${APP}/.default`, env, fetch: f });
+    expect((await exportOnce(e, spans())).code).toBe(ExportResultCode.SUCCESS);
+    const mi = new URL(calls[0]!.url);
+    expect(`${mi.origin}${mi.pathname}`).toBe(env.IDENTITY_ENDPOINT);
+    expect(mi.searchParams.get('resource')).toBe(APP);
+    expect(mi.searchParams.get('api-version')).toBe('2019-08-01');
+    expect(headersOf(calls[0]!)['x-identity-header']).toBe('hdr');
+    expect(calls[1]!.url).toBe('https://api-dev.redberry.sbs/api/discover/azure');
+    expect(headersOf(calls[1]!).authorization).toBe(`Bearer ${MI_TOKEN}`);
+    expect(calls[2]!.url).toBe(`${INGEST_URL}/v1/traces`);
+    expect(headersOf(calls[2]!).authorization).toBe(`Bearer ${MI_TOKEN}`);
+    await exportOnce(e, spans());
+    expect(calls.filter((c) => c.url.includes('/api/discover/azure'))).toHaveLength(1);
+    expect(calls.filter((c) => c.url.startsWith(env.IDENTITY_ENDPOINT))).toHaveLength(1);
+  });
+
+  it('an identity Redberry does not know fails the export (counted, not thrown)', async () => {
+    const { f } = mockFetch(handler(404));
+    const e = redberryExporter({ cloud: 'azure', scope: `${APP}/.default`, env, fetch: f });
+    const r = await exportOnce(e, spans());
+    expect(r.code).toBe(ExportResultCode.FAILED);
+    expect(r.error?.message).toMatch(/discovery: .*installation/);
+  });
+
+  it('on Azure the options need nothing set (cloud, scope inferred)', () => {
+    const o = exporterOptionsFrom({}, env);
+    expect(o).toMatchObject({ cloud: 'azure', scope: `${APP}/.default` });
+    expect(o.endpoint).toBeUndefined();
+  });
+});
+
+describe('platformResourceAttributes', () => {
+  it('names a Lambda function and an Azure Function or Container App (the scoring job reads its code)', async () => {
+    const { platformResourceAttributes } = await import('../src/ingest/config');
+    expect(platformResourceAttributes({ AWS_LAMBDA_FUNCTION_NAME: 'refund', AWS_REGION: 'eu-west-2', AWS_LAMBDA_FUNCTION_VERSION: '$LATEST' })).toEqual({
+      'cloud.provider': 'aws', 'cloud.platform': 'aws_lambda', 'faas.name': 'refund', 'faas.version': '$LATEST', 'cloud.region': 'eu-west-2',
+    });
+    expect(platformResourceAttributes({ WEBSITE_SITE_NAME: 'refund-fn', FUNCTIONS_WORKER_RUNTIME: 'node', REGION_NAME: 'UK South' })).toEqual({
+      'cloud.provider': 'azure', 'cloud.platform': 'azure_functions', 'faas.name': 'refund-fn', 'cloud.region': 'UK South',
+    });
+    expect(platformResourceAttributes({ CONTAINER_APP_NAME: 'refund-app' })['cloud.platform']).toBe('azure_container_apps');
+    expect(platformResourceAttributes({})).toEqual({});
+  });
+});

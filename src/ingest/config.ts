@@ -40,13 +40,20 @@ export interface IngestConfig {
   getOidcToken?: () => Promise<string>;
 }
 
+/** Redberry's ingest application (dev): the audience of the Entra tokens agents send with on Azure. */
+export const DEFAULT_AZURE_APP_ID_URI = 'api://c1b7f6d8-a898-4679-8343-9223a5f832d7';
+
 /** The exporter options from ``options`` and the REDBERRY_* environment variables (options win). */
 export function exporterOptionsFrom(o: IngestConfig, env: Env = process.env): RedberryExporterOptions {
   const endpoint = o.endpoint ?? env.REDBERRY_INGEST_URL ?? '';
   const onLambda = !!(env.AWS_LAMBDA_FUNCTION_NAME || env.ECS_CONTAINER_METADATA_URI_V4);
-  const cloud = o.cloud ?? (env.REDBERRY_CLOUD as Cloud | undefined) ?? (onLambda ? 'aws' : undefined);
-  // On AWS the ingest URL can be discovered (discover-aws.ts); elsewhere it is required.
-  if (!endpoint && cloud !== 'aws') throw new Error('Redberry: the ingest URL is required (endpoint or REDBERRY_INGEST_URL)');
+  const onAzure = !!(env.IDENTITY_ENDPOINT && env.IDENTITY_HEADER);
+  const cloud =
+    o.cloud ?? (env.REDBERRY_CLOUD as Cloud | undefined) ?? (onLambda ? 'aws' : onAzure ? 'azure' : undefined);
+  // On AWS and Azure the ingest URL can be discovered (discover-aws.ts, discover-azure.ts); elsewhere it is required.
+  if (!endpoint && cloud !== 'aws' && cloud !== 'azure') {
+    throw new Error('Redberry: the ingest URL is required (endpoint or REDBERRY_INGEST_URL)');
+  }
   const base = { endpoint: endpoint || undefined, timeoutMillis: o.timeoutMillis, fetch: o.fetch, getOidcToken: o.getOidcToken };
   switch (cloud) {
     case 'gcp':
@@ -70,12 +77,38 @@ export function exporterOptionsFrom(o: IngestConfig, env: Env = process.env): Re
       return {
         ...base,
         cloud,
-        tenantId: o.tenantId ?? env.REDBERRY_AZURE_TENANT_ID ?? '',
-        clientId: o.clientId ?? env.REDBERRY_AZURE_CLIENT_ID ?? '',
-        scope: o.scope ?? env.REDBERRY_AZURE_SCOPE ?? '',
+        tenantId: o.tenantId ?? env.REDBERRY_AZURE_TENANT_ID,
+        clientId: o.clientId ?? env.REDBERRY_AZURE_CLIENT_ID ?? env.AZURE_CLIENT_ID,
+        scope: o.scope ?? env.REDBERRY_AZURE_SCOPE ?? `${env.REDBERRY_AZURE_APP_ID_URI ?? DEFAULT_AZURE_APP_ID_URI}/.default`,
+        apiUrl: env.REDBERRY_API_URL,
+        env,
       };
     default:
       throw new Error(`Redberry: cloud (REDBERRY_CLOUD) must be gcp, aws or azure, not ${String(cloud)}`);
   }
 }
 
+
+/**
+ * Where the agent runs, as OpenTelemetry resource attributes: the scoring job reads the agent's code from
+ * these (a Lambda function by name and region; an Azure Function or Container App by name). Empty elsewhere.
+ */
+export function platformResourceAttributes(env: Env = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  const set = (k: string, v: string | undefined) => {
+    if (v && v.trim()) out[k] = v.trim();
+  };
+  if (env.AWS_LAMBDA_FUNCTION_NAME) {
+    set('cloud.provider', 'aws');
+    set('cloud.platform', 'aws_lambda');
+    set('faas.name', env.AWS_LAMBDA_FUNCTION_NAME);
+    set('faas.version', env.AWS_LAMBDA_FUNCTION_VERSION);
+    set('cloud.region', env.AWS_REGION);
+  } else if (env.CONTAINER_APP_NAME || env.WEBSITE_SITE_NAME) {
+    set('cloud.provider', 'azure');
+    set('cloud.platform', env.CONTAINER_APP_NAME ? 'azure_container_apps' : env.FUNCTIONS_WORKER_RUNTIME ? 'azure_functions' : 'azure_app_service');
+    set('faas.name', env.CONTAINER_APP_NAME || env.WEBSITE_SITE_NAME);
+    set('cloud.region', env.REGION_NAME);
+  }
+  return out;
+}

@@ -6,7 +6,7 @@ import { context, diag, trace } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { defaultResource, resourceFromAttributes } from '@opentelemetry/resources';
 import { BasicTracerProvider, BatchSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, validateAgentName, type IngestConfig } from './ingest/config';
+import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, platformResourceAttributes, validateAgentName, type IngestConfig } from './ingest/config';
 import { redberryExporter, type RedberryExporter } from './ingest/exporter';
 
 export * from './index';
@@ -49,7 +49,11 @@ export function init(options: InitOptions): RedberryTracing {
   if (!context.setGlobalContextManager(manager)) manager.disable(); // one is registered already: keep it
   const provider = new BasicTracerProvider({
     resource: defaultResource().merge(
-      resourceFromAttributes({ 'service.name': options.serviceName || env.OTEL_SERVICE_NAME || agent, [AGENT_NAME_ATTRIBUTE]: agent }),
+      resourceFromAttributes({
+        ...platformResourceAttributes(env),
+        'service.name': options.serviceName || env.OTEL_SERVICE_NAME || agent,
+        [AGENT_NAME_ATTRIBUTE]: agent,
+      }),
     ),
     spanProcessors: [new BatchSpanProcessor(exporter, { maxQueueSize: options.maxQueueSize ?? 2048 }), ...(options.spanProcessors ?? [])],
   });
