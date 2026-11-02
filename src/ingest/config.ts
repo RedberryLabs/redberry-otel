@@ -109,6 +109,12 @@ export function platformResourceAttributes(env: Env = process.env): Record<strin
     set('cloud.platform', env.CONTAINER_APP_NAME ? 'azure_container_apps' : env.FUNCTIONS_WORKER_RUNTIME ? 'azure_functions' : 'azure_app_service');
     set('faas.name', env.CONTAINER_APP_NAME || env.WEBSITE_SITE_NAME);
     set('cloud.region', env.REGION_NAME);
+  } else if (env.VERCEL_DEPLOYMENT_ID || env.VERCEL) {
+    // As @vercel/otel names them: the scoring job fetches the deployment's source by vercel.deployment_id.
+    set('vercel.deployment_id', env.VERCEL_DEPLOYMENT_ID);
+    set('vercel.project_id', env.VERCEL_PROJECT_ID);
+    set('vercel.region', env.VERCEL_REGION);
+    set('vercel.sha', env.VERCEL_GIT_COMMIT_SHA);
   }
   return out;
 }
