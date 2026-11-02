@@ -415,4 +415,11 @@ describe('platformResourceAttributes', () => {
     expect(platformResourceAttributes({ CONTAINER_APP_NAME: 'refund-app' })['cloud.platform']).toBe('azure_container_apps');
     expect(platformResourceAttributes({})).toEqual({});
   });
+
+  it('names a Vercel deployment as @vercel/otel does (the scoring job fetches its source)', async () => {
+    const { platformResourceAttributes } = await import('../src/ingest/config');
+    expect(platformResourceAttributes({
+      VERCEL: '1', VERCEL_DEPLOYMENT_ID: 'dpl_abc', VERCEL_PROJECT_ID: 'prj_1', VERCEL_REGION: 'lhr1', VERCEL_GIT_COMMIT_SHA: 'f00d',
+    })).toEqual({ 'vercel.deployment_id': 'dpl_abc', 'vercel.project_id': 'prj_1', 'vercel.region': 'lhr1', 'vercel.sha': 'f00d' });
+  });
 });
