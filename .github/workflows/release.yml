@@ -11,6 +11,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm   # a maintainer approves each release before it publishes
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
