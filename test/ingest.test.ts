@@ -3,7 +3,8 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor, type ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REFRESH_MARGIN_MS } from '../src/ingest/credentials';
-import { ExportResultCode, redberryExporter, type RedberryExporterOptions } from '../src/ingest/exporter';
+import { DISCOVERY_FAILURE_ATTRIBUTE, ExportResultCode, redberryExporter, type RedberryExporterOptions } from '../src/ingest/exporter';
+import { discoveryFailureMarker } from '../src/ingest/marker';
 import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, validateAgentName } from '../src/ingest/config';
 import { init } from '../src/init';
 import { IAM_URL, STS_URL } from '../src/stores/gcs';
@@ -328,17 +329,33 @@ describe('redberryExporter: aws discovery', () => {
     expect(calls.filter((c) => c.url === OBJECT)).toHaveLength(1);
   });
 
-  it('a bucket it cannot read (another owner, not installed) fails the export, never throws, and is retried later', async () => {
+  it('a bucket it cannot read fails the export with a coded error, said once, and is retried after the interval', async () => {
     let status = 403;
+    let t = Date.now();
+    const said: string[] = [];
+    const logger = { error: (m: string) => said.push(`error ${m}`), warn: (m: string) => said.push(`warn ${m}`) };
     const { f, calls } = mockFetch((url) => handler(status)(url));
-    const e = redberryExporter({ cloud: 'aws', region: 'eu-west-1', env, fetch: f });
+    const e = redberryExporter({ cloud: 'aws', region: 'eu-west-1', env, fetch: f, now: () => t, discoveryRetryMs: 300_000, logger });
     const r = await exportOnce(e, spans());
     expect(r.code).toBe(ExportResultCode.FAILED);
     expect(r.error?.message).toMatch(/discovery: .*redberry-123456789012-eu-west-1\/ingest\.json/);
     expect(e.droppedSpans()).toBe(2);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatch(/^error @redberrylabs\/otel: RB-SDK-DISC-002: .*re-run the install.*every 300 s/);
     status = 200;
+    // Within the interval: no new attempt, the export fails at once.
+    t += 60_000;
+    expect((await exportOnce(e, spans())).error?.message).toMatch(/RB-SDK-DISC-002: .*tried again in 240 s/);
+    expect(calls.filter((c) => c.url === OBJECT)).toHaveLength(1);
+    // After it: found, sent, said once, and reported for an hour.
+    t += 240_000;
     expect((await exportOnce(e, spans())).code).toBe(ExportResultCode.SUCCESS);
     expect(calls.filter((c) => c.url === OBJECT)).toHaveLength(2);
+    expect(said).toHaveLength(2);
+    expect(said[1]).toMatch(/^warn @redberrylabs\/otel: RB-SDK-DISC-002 resolved: .*after about 5 min/);
+    expect(e.recentRecovery()).toEqual({ code: 'RB-SDK-DISC-002', minutes: 5 });
+    t += 3_600_000;
+    expect(e.recentRecovery()).toBeUndefined();
   });
 
   it('refuses an ingest.json without an https url', async () => {
@@ -388,12 +405,17 @@ describe('redberryExporter: azure managed identity and discovery', () => {
     expect(calls.filter((c) => c.url.startsWith(env.IDENTITY_ENDPOINT))).toHaveLength(1);
   });
 
-  it('an identity Redberry does not know fails the export (counted, not thrown)', async () => {
+  it('an identity Redberry does not know fails the export (counted, not thrown), with code RB-SDK-DISC-003', async () => {
+    const said: string[] = [];
+    const logger = { error: (m: string) => said.push(m), warn: (m: string) => said.push(m) };
     const { f } = mockFetch(handler(404));
-    const e = redberryExporter({ cloud: 'azure', scope: `${APP}/.default`, env, fetch: f });
+    const e = redberryExporter({ cloud: 'azure', scope: `${APP}/.default`, env, fetch: f, logger });
     const r = await exportOnce(e, spans());
     expect(r.code).toBe(ExportResultCode.FAILED);
     expect(r.error?.message).toMatch(/discovery: .*installation/);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatch(/RB-SDK-DISC-003: .*managed identity/);
+    expect(e.recentRecovery()).toBeUndefined();
   });
 
   it('on Azure the options need nothing set (cloud, scope inferred)', () => {
@@ -421,5 +443,27 @@ describe('platformResourceAttributes', () => {
     expect(platformResourceAttributes({
       VERCEL: '1', VERCEL_DEPLOYMENT_ID: 'dpl_abc', VERCEL_PROJECT_ID: 'prj_1', VERCEL_REGION: 'lhr1', VERCEL_GIT_COMMIT_SHA: 'f00d',
     })).toEqual({ 'vercel.deployment_id': 'dpl_abc', 'vercel.project_id': 'prj_1', 'vercel.region': 'lhr1', 'vercel.sha': 'f00d' });
+  });
+});
+
+
+describe('discovery visibility: settings and the marker', () => {
+  it('REDBERRY_DISCOVERY_RETRY_S sets the retry interval; an option wins', () => {
+    const env = { AWS_LAMBDA_FUNCTION_NAME: 'refund', AWS_REGION: 'eu-west-1' };
+    expect(exporterOptionsFrom({}, { ...env, REDBERRY_DISCOVERY_RETRY_S: '60' }).discoveryRetryMs).toBe(60_000);
+    expect(exporterOptionsFrom({}, { ...env, REDBERRY_DISCOVERY_RETRY_S: 'soon' }).discoveryRetryMs).toBeUndefined();
+    expect(exporterOptionsFrom({ discoveryRetryMs: 5_000 }, { ...env, REDBERRY_DISCOVERY_RETRY_S: '60' }).discoveryRetryMs).toBe(5_000);
+  });
+
+  it('discoveryFailureMarker stamps new spans only while a recovery is recent', () => {
+    const state: { recent?: { code: string; minutes: number } } = {};
+    const marker = discoveryFailureMarker({ recentRecovery: () => state.recent });
+    const attrs: Record<string, unknown> = {};
+    const span = { setAttribute: (k: string, v: unknown) => (attrs[k] = v) } as never;
+    marker.onStart(span, {} as never);
+    expect(attrs).toEqual({});
+    state.recent = { code: 'RB-SDK-DISC-003', minutes: 25 };
+    marker.onStart(span, {} as never);
+    expect(attrs).toEqual({ [DISCOVERY_FAILURE_ATTRIBUTE]: 'RB-SDK-DISC-003;25' });
   });
 });

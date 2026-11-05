@@ -8,6 +8,7 @@ import { defaultResource, resourceFromAttributes } from '@opentelemetry/resource
 import { BasicTracerProvider, BatchSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, platformResourceAttributes, validateAgentName, type IngestConfig } from './ingest/config';
 import { redberryExporter, type RedberryExporter } from './ingest/exporter';
+import { discoveryFailureMarker } from './ingest/marker';
 
 export * from './index';
 
@@ -55,7 +56,11 @@ export function init(options: InitOptions): RedberryTracing {
         [AGENT_NAME_ATTRIBUTE]: agent,
       }),
     ),
-    spanProcessors: [new BatchSpanProcessor(exporter, { maxQueueSize: options.maxQueueSize ?? 2048 }), ...(options.spanProcessors ?? [])],
+    spanProcessors: [
+      discoveryFailureMarker(exporter),
+      new BatchSpanProcessor(exporter, { maxQueueSize: options.maxQueueSize ?? 2048 }),
+      ...(options.spanProcessors ?? []),
+    ],
   });
   if (!trace.setGlobalTracerProvider(provider)) {
     diag.warn('@redberrylabs/otel: another tracer provider is already registered; pass redberryExporter() to it instead');

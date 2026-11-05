@@ -5,8 +5,21 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
+### Added
+
+- `discoveryFailureMarker(exporter)`: for an hour after the exporter recovers from a discovery failure, new spans
+  carry `redberry.sdk.discovery_failure` (`<code>;<minutes>`), so the install can show how long the agent could
+  not send. `init()` adds it; with `@vercel/otel`, add it beside `redberryExporter()`.
+- `exporter.recentRecovery()`, and the `discoveryRetryMs` option (`REDBERRY_DISCOVERY_RETRY_S`).
+
 ### Changed
 
+- When the install cannot be found on AWS or Azure, the exporter says so once with a code and the fix
+  (`RB-SDK-DISC-002`, `RB-SDK-DISC-003`), on the console as well as the `diag` logger, so it shows in Lambda,
+  Azure and Vercel logs. Discovery is tried again every 5 minutes instead of on every export, and its recovery is
+  logged.
 - Releases to npm now wait for a maintainer's approval (the `npm` environment).
 
 ## [0.4.0] - 2026-11-02
@@ -55,7 +68,8 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 - First release.
 
-[Unreleased]: https://github.com/RedberryLabs/redberry-otel/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/RedberryLabs/redberry-otel/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.1.1...v0.2.0

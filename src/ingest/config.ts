@@ -36,6 +36,8 @@ export interface IngestConfig {
   clientId?: string;
   scope?: string;
   timeoutMillis?: number;
+  /** After a failed discovery, how long until it is tried again. Env: REDBERRY_DISCOVERY_RETRY_S (seconds; default 300). */
+  discoveryRetryMs?: number;
   fetch?: RedberryExporterOptions['fetch'];
   getOidcToken?: () => Promise<string>;
 }
@@ -54,7 +56,15 @@ export function exporterOptionsFrom(o: IngestConfig, env: Env = process.env): Re
   if (!endpoint && cloud !== 'aws' && cloud !== 'azure') {
     throw new Error('Redberry: the ingest URL is required (endpoint or REDBERRY_INGEST_URL)');
   }
-  const base = { endpoint: endpoint || undefined, timeoutMillis: o.timeoutMillis, fetch: o.fetch, getOidcToken: o.getOidcToken };
+  const retryS = Number(env.REDBERRY_DISCOVERY_RETRY_S);
+  const discoveryRetryMs = o.discoveryRetryMs ?? (Number.isFinite(retryS) && retryS > 0 ? retryS * 1000 : undefined);
+  const base = {
+    endpoint: endpoint || undefined,
+    timeoutMillis: o.timeoutMillis,
+    discoveryRetryMs,
+    fetch: o.fetch,
+    getOidcToken: o.getOidcToken,
+  };
   switch (cloud) {
     case 'gcp':
       return {

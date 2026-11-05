@@ -66,6 +66,7 @@ On AWS Lambda and Azure, `init()` also records where the agent runs (`faas.name`
 | `REDBERRY_AZURE_TENANT_ID` | `tenantId` | Azure: Entra ID tenant |
 | `REDBERRY_AZURE_CLIENT_ID` | `clientId` | Azure: app or managed identity with a federated credential for the Vercel issuer |
 | `REDBERRY_AZURE_SCOPE` | `scope` | Azure: `<ingest application ID URI>/.default` |
+| `REDBERRY_DISCOVERY_RETRY_S` | `discoveryRetryMs` | AWS, Azure: after the install could not be found, seconds until it is tried again (default 300) |
 
 How each cloud authenticates:
 
@@ -78,6 +79,15 @@ Tokens are cached until five minutes before they expire, with one refresh at a t
 ### Failure behaviour
 
 The exporter never throws into your application. An export that cannot be delivered resolves `FAILED`; 429, 5xx, 401 and 403 (IAM changes can take minutes to propagate) are retried with backoff within `timeoutMillis` (default 10 s). Each kind of failure is logged once through the OpenTelemetry `diag` logger, and `exporter.droppedSpans()` counts the spans that were not delivered.
+
+When the install cannot be found (AWS and Azure discover it), the exporter logs an error with a code and the fix, on the console as well, so it shows in your function's logs. It keeps trying every 5 minutes and starts sending as soon as the cause is fixed, with no redeploy:
+
+| Code | Cause | Fix |
+|---|---|---|
+| `RB-SDK-DISC-002` | AWS: the install's `ingest.json` could not be read | Check that the install ran in this account and region, and that this function was chosen as an agent (run the install again and select it) |
+| `RB-SDK-DISC-003` | Azure: the install could not be found | Check that the app has a managed identity and was chosen as an agent (run the install again and select it) |
+
+For an hour after recovering, new spans carry `redberry.sdk.discovery_failure` (the code and how many minutes it lasted), so the install can show the outage. `init()` sets this up; with `@vercel/otel`, add `discoveryFailureMarker(exporter)` to its span processors.
 
 ## Deprecated: in-process hashing
 

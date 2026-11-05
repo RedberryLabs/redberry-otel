@@ -1,6 +1,6 @@
 {
   "name": "@redberrylabs/otel",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Send AI agent traces to your Redberry installation (OTLP over HTTP to the ingest service in your own cloud): an OpenTelemetry exporter for Vercel, AWS Lambda and Azure Functions.",
   "license": "Apache-2.0",
   "type": "module",
