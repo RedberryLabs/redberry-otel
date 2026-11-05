@@ -4,6 +4,12 @@
 //
 // It never throws into the application: every failure resolves ExportResultCode.FAILED, is logged once per
 // kind through the OpenTelemetry diag logger, and its spans are counted in droppedSpans().
+//
+// When the install cannot be found (discovery on AWS or Azure), that is said once, with a code, on the
+// console as well (where Lambda, Azure and Vercel logs show it): RB-SDK-DISC-002 (AWS) or RB-SDK-DISC-003
+// (Azure). Exports fail at once meanwhile, and discovery is tried again every ``discoveryRetryMs`` (default
+// 300000; REDBERRY_DISCOVERY_RETRY_S). Once it succeeds the exporter sends there, and for an hour
+// ``recentRecovery()`` reports the outage, which discoveryFailureMarker() stamps on new spans.
 import { diag } from '@opentelemetry/api';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
@@ -32,6 +38,10 @@ interface Base {
   now?: () => number;
   /** Waits before retries (default 250, 1000, 3000 ms), cut short by ``timeoutMillis``. */
   retryDelaysMs?: readonly number[];
+  /** After a failed discovery, how long until it is tried again (default 300000). */
+  discoveryRetryMs?: number;
+  /** Where the coded discovery messages go besides ``diag`` (default: console). */
+  logger?: Pick<Console, 'error' | 'warn'>;
 }
 
 export interface GcpExporterOptions extends Base {
@@ -65,7 +75,14 @@ export type RedberryExporterOptions = GcpExporterOptions | AwsExporterOptions | 
 export interface RedberryExporter extends SpanExporter {
   /** Spans whose export failed, saturating at ``Number.MAX_SAFE_INTEGER``. */
   droppedSpans(): number;
+  /** A discovery failure that ended within the last hour: its code and how many minutes it lasted. */
+  recentRecovery(): { code: string; minutes: number } | undefined;
 }
+
+export const DEFAULT_DISCOVERY_RETRY_MS = 300_000;
+/** How long after recovering the outage is reported on new spans. */
+export const RECOVERY_SHOWN_MS = 3_600_000;
+export const DISCOVERY_FAILURE_ATTRIBUTE = 'redberry.sdk.discovery_failure';
 
 export const DEFAULT_TIMEOUT_MS = 10_000;
 export const DEFAULT_EXPORT_RETRY_DELAYS_MS = [250, 1000, 3000] as const;
@@ -95,28 +112,63 @@ export function redberryExporter(options: RedberryExporterOptions): RedberryExpo
     throw new Error('redberryExporter(): endpoint is required');
   }
   const credential = credentialFor(options);
-  // The traces URL: fixed, or (AWS, no endpoint) discovered once and cached; a failed discovery is
-  // retried on the next export.
-  let discovered: Promise<string> | undefined;
-  const urlOf = (): Promise<string> => {
-    if (options.endpoint) return Promise.resolve(`${trimBase(options.endpoint)}/v1/traces`);
+  const now = options.now ?? Date.now;
+  const log = options.logger ?? console;
+  const retryMs = Math.max(5_000, options.discoveryRetryMs ?? DEFAULT_DISCOVERY_RETRY_MS);
+  // Discovery state: the current failure (code, since, next attempt) and the last recovery.
+  let failure: { code: string; since: number; next: number } | undefined;
+  let recovered: { code: string; minutes: number; at: number } | undefined;
+  const say = (level: 'error' | 'warn', message: string) => {
+    try {
+      log[level](message);
+      diag[level](message);
+    } catch {
+      // never let logging escape
+    }
+  };
+  const discover = (): Promise<string> => {
     if (options.cloud === 'azure' && credential.azureToken) {
-      discovered ??= discoverAzureIngest({ token: credential.azureToken, apiUrl: options.apiUrl, fetch: options.fetch })
-        .then((u) => `${u}/v1/traces`)
-        .catch((e: unknown) => {
-          discovered = undefined;
-          throw e;
-        });
-      return discovered;
+      return discoverAzureIngest({ token: credential.azureToken, apiUrl: options.apiUrl, fetch: options.fetch }).then((u) => `${u}/v1/traces`);
     }
     const creds = credential.awsCredentials;
     if (!creds || options.cloud !== 'aws') return Promise.reject(new Error('no endpoint'));
-    discovered ??= discoverAwsIngest({ region: options.region, credentials: creds, fetch: options.fetch, now: options.now })
-      .then((d) => `${d.url}/v1/traces`)
-      .catch((e: unknown) => {
+    return discoverAwsIngest({ region: options.region, credentials: creds, fetch: options.fetch, now: options.now }).then((d) => `${d.url}/v1/traces`);
+  };
+  // The traces URL: fixed, or (AWS, Azure; no endpoint) discovered once and cached. A failed discovery is
+  // said once, with its code, and tried again only every retryMs; exports fail at once in between.
+  let discovered: Promise<string> | undefined;
+  const urlOf = (): Promise<string> => {
+    if (options.endpoint) return Promise.resolve(`${trimBase(options.endpoint)}/v1/traces`);
+    if (discovered) return discovered;
+    if (failure && now() < failure.next) {
+      return Promise.reject(new Error(`${failure.code}: the install has not been found yet; tried again in ${Math.ceil((failure.next - now()) / 1000)} s`));
+    }
+    discovered = discover().then(
+      (url) => {
+        if (failure) {
+          const minutes = Math.max(1, Math.round((now() - failure.since) / 60_000));
+          recovered = { code: failure.code, minutes, at: now() };
+          say('warn', `@redberrylabs/otel: ${failure.code} resolved: the Redberry install was found after about ${minutes} min; sending spans to ${url}. Spans from before were not delivered (droppedSpans()).`);
+          failure = undefined;
+        }
+        return url;
+      },
+      (e: unknown) => {
         discovered = undefined;
+        const code = options.cloud === 'azure' ? 'RB-SDK-DISC-003' : 'RB-SDK-DISC-002';
+        const first = !failure;
+        failure = { code, since: failure?.since ?? now(), next: now() + retryMs };
+        if (first) {
+          const detail = e instanceof Error ? e.message : String(e);
+          const fix =
+            options.cloud === 'azure'
+              ? 'check that the app has a managed identity and was chosen as an agent (re-run the install and select it), or set REDBERRY_INGEST_URL'
+              : 'check that the install ran in this account and region and that this function was chosen as an agent (re-run the install and select it), or set REDBERRY_INGEST_URL';
+          say('error', `@redberrylabs/otel: ${code}: the Redberry install could not be found (${detail}): ${fix}. Spans are not delivered until this is fixed; discovery is tried again every ${Math.round(retryMs / 1000)} s.`);
+        }
         throw e;
-      });
+      },
+    );
     return discovered;
   };
   const f: Fetch = options.fetch ?? ((...a) => fetch(...a));
@@ -203,5 +255,7 @@ export function redberryExporter(options: RedberryExporterOptions): RedberryExpo
       await Promise.all([...inFlight]);
     },
     droppedSpans: () => dropped,
+    recentRecovery: () =>
+      recovered && now() - recovered.at < RECOVERY_SHOWN_MS ? { code: recovered.code, minutes: recovered.minutes } : undefined,
   };
 }
