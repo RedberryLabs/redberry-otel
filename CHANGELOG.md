@@ -5,6 +5,8 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
 ### Changed
 
 - **Licence.** From this release the package is licensed under the PolyForm Shield License 1.0.0, replacing the
@@ -83,7 +85,8 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 - First release.
 
-[Unreleased]: https://github.com/RedberryLabs/redberry-otel/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/RedberryLabs/redberry-otel/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/RedberryLabs/redberry-otel/compare/v0.2.0...v0.3.0
