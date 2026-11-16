@@ -7,7 +7,7 @@ import { DISCOVERY_FAILURE_ATTRIBUTE, ExportResultCode, redberryExporter, type R
 import { discoveryFailureMarker } from '../src/ingest/marker';
 import { AGENT_NAME_ATTRIBUTE, exporterOptionsFrom, validateAgentName } from '../src/ingest/config';
 import { init } from '../src/init';
-import { IAM_URL, STS_URL } from '../src/stores/gcs';
+import { IAM_URL, STS_URL } from '../src/ingest/cloud';
 
 const INGEST = 'https://ingest-abc-ew.a.run.app';
 const OIDC = 'vercel.oidc.jwt';

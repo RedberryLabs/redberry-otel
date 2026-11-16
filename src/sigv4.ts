@@ -1,4 +1,4 @@
-// AWS Signature Version 4 (header-based), the part of it the s3 store needs: a canonical request, the string
+// AWS Signature Version 4 (header-based), the part of it the AWS ingest path needs: a canonical request, the string
 // to sign, the derived signing key and the Authorization header. Checked against AWS's published examples
 // (test/sigv4.test.ts). Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html
 import { createHash, createHmac } from 'node:crypto';
