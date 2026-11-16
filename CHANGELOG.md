@@ -5,6 +5,11 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 ## [Unreleased]
 
+### Changed
+
+- **Licence.** From this release the package is licensed under the PolyForm Shield License 1.0.0, replacing the
+  Apache License 2.0. Versions 0.5.0 and earlier remain under the Apache License 2.0. See `LICENSE` and `NOTICE`.
+
 ### Removed
 
 - **The in-process hasher.** `RedberryProcessor`, `withRedberry`, `registerRedberry` (the `@redberrylabs/otel/node`
