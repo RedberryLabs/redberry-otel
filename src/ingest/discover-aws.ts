@@ -5,8 +5,7 @@
 // global). Both requests are SigV4-signed with the runtime's own credentials.
 import { EMPTY_SHA256, sha256Hex, sign, type AwsCredentials } from '../sigv4';
 import { describe, type Fetch } from '../http';
-
-const STS_VERSION = '2011-06-15';
+import { STS_VERSION } from './cloud';
 
 export interface AwsDiscoveryOptions {
   region: string;

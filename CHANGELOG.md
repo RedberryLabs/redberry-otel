@@ -5,6 +5,16 @@ All notable changes to `@redberrylabs/otel` are recorded here. The project follo
 
 ## [Unreleased]
 
+### Removed
+
+- **The in-process hasher.** `RedberryProcessor`, `withRedberry`, `registerRedberry` (the `@redberrylabs/otel/node`
+  entry), the stores (`vercelBlob`, `gcs`, `azureBlob`, `s3`, `redberry`) and the stored-trace and report functions
+  (`buildEnvelope`, `encodeTrace`, `canonicalJson`, `loadSigner`, `sendReport` and the rest) are removed. They were
+  deprecated in favour of `redberryExporter()` and `init()`, which send spans to the ingest service in the
+  customer's cloud; no signing key, bucket or hashing runs in the agent's process. `SPEC.md` (the
+  `redberry.trace.v1` format) is no longer shipped. `fflate` is no longer a dependency, and `@vercel/blob` no longer
+  a peer dependency.
+
 ## [0.5.0] - 2026-11-05
 
 ### Added

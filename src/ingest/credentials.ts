@@ -10,9 +10,7 @@
 import type { Fetch } from '../http';
 import { describe, readJson } from '../http';
 import { sha256Hex, sign, type AwsCredentials } from '../sigv4';
-import { LOGIN_URL } from '../stores/azure-blob';
-import { googleStsExchange, IAM_URL, poolProviderAudience, vercelOidcToken } from '../stores/gcs';
-import { parseAssumeRoleReply, s3CredentialFor, STS_VERSION } from '../stores/s3';
+import { awsCredentialSource, googleStsExchange, IAM_URL, LOGIN_URL, parseAssumeRoleReply, poolProviderAudience, STS_VERSION, vercelOidcToken } from './cloud';
 
 export const REFRESH_MARGIN_MS = 5 * 60_000;
 const DEFAULT_LIFETIME_MS = 3_600_000;
@@ -129,7 +127,7 @@ export function gcpCredential(o: GcpCredentialOptions): IngestCredential {
 export function awsCredential(o: AwsCredentialOptions): IngestCredential {
   if (!o.region) throw new Error('redberryExporter(aws): region is required');
   const env = o.env ?? process.env;
-  const kind = s3CredentialFor(env, o.roleArn) ?? (o.roleArn && o.getOidcToken ? 'vercel-oidc' : undefined);
+  const kind = awsCredentialSource(env, o.roleArn) ?? (o.roleArn && o.getOidcToken ? 'vercel-oidc' : undefined);
   if (!kind) {
     throw new Error('redberryExporter(aws): no AWS credentials: needs Vercel (OIDC) with roleArn, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY');
   }
